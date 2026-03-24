@@ -1,0 +1,1458 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="산첩첩 예약">
+<title>산첩첩물첩첩 예약관리</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🍖</text></svg>">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+  body { background: #f5f5f3; font-family: "Noto Sans KR", sans-serif; }
+  select { appearance: none; }
+  select option { background: #fff; color: #1a1714; }
+  input[type="date"]::-webkit-calendar-picker-indicator { opacity: 0.5; cursor: pointer; }
+  input, select, textarea { -webkit-appearance: none; }
+  ::-webkit-scrollbar { width: 4px; height: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #e2ddd6; border-radius: 4px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<script type="text/babel">
+const { useState, useEffect, useRef } = React;
+
+// ── Supabase 설정 ─────────────────────────────────────────
+const SUPABASE_URL = "https://dupgysdkeibtjbbyyyve.supabase.co";
+const SUPABASE_KEY = "sb_publishable_0RhqHdEfiVwXs7Lz-OtcoA_0UpMZ6vY";
+
+async function sbFetch(path, options={}) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+    headers: {
+      "apikey": SUPABASE_KEY,
+      "Authorization": `Bearer ${SUPABASE_KEY}`,
+      "Content-Type": "application/json",
+      "Prefer": options.prefer !== undefined ? options.prefer : "return=minimal",
+    },
+    ...options,
+  });
+  if (!res.ok) {
+    const err = await res.text();
+    console.error("Supabase error:", path, err);
+    throw new Error(err);
+  }
+  const text = await res.text();
+  return text ? JSON.parse(text) : [];
+}
+
+// 예약 row → DB 컬럼 매핑
+function toDbRes(r) {
+  return {
+    id:       r.id,
+    store:    STORE_ID,
+    name:     r.name     || "",
+    pax:      r.pax      || 0,
+    date:     r.date     || "",
+    time:     r.time     || "",
+    "table":  r.table    || 1,
+    phone:    r.phone    || "",
+    memo:     r.memo     || "",
+    walk_in:  r.walkIn   || r.walk_in || false,
+    status:   r.status   || "upcoming",
+    group_id: r.groupId  || r.group_id || null,
+  };
+}
+
+const db = {
+  getReservations: () => sbFetch(`reservations?select=*&store=eq.${STORE_ID}&order=date,time`),
+  upsertReservation: (r) => sbFetch("reservations", {
+    method:"POST",
+    prefer:"resolution=merge-duplicates",
+    body: JSON.stringify(toDbRes(r)),
+  }),
+  upsertReservations: (rows) => sbFetch("reservations", {
+    method:"POST",
+    prefer:"resolution=merge-duplicates",
+    body: JSON.stringify(rows.map(toDbRes)),
+  }),
+  deleteReservation: (id) => sbFetch(`reservations?id=eq.${id}`, { method:"DELETE", prefer:"" }),
+  updateReservation: (id, patch) => sbFetch(`reservations?id=eq.${id}`, {
+    method:"PATCH", prefer:"", body: JSON.stringify(patch),
+  }),
+
+  getCustomers: () => sbFetch(`customers?select=*&store=eq.${STORE_ID}`),
+  upsertCustomer: (c) => sbFetch("customers", {
+    method:"POST",
+    prefer:"resolution=merge-duplicates",
+    body: JSON.stringify({
+      id:c.id, store:STORE_ID, name:c.name||"", phone:c.phone||"",
+      visits:c.visits||0, last_visit:c.lastVisit||c.last_visit||"-", memo:c.memo||"",
+    }),
+  }),
+
+  getSettings: () => sbFetch(`store_settings?select=*&store=eq.${STORE_ID}`),
+  upsertSettings: (s) => sbFetch("store_settings", {
+    method:"POST",
+    prefer:"resolution=merge-duplicates",
+    body: JSON.stringify(s),
+  }),
+};
+
+const STORES = [
+  { name: "산첩첩물첩첩", tables: 14 },
+];
+const STORE_ID = 1; // Supabase DB의 store=1 (산첩첩물첩첩)
+
+const TIMES = ["17:00","17:30","18:00","18:30","19:00","19:30","20:00","20:30","21:00","21:30"];
+
+// status: "upcoming" | "dining" | "done"
+
+function todayStr() { return new Date().toISOString().split("T")[0]; }
+function formatDate(d) {
+  const days=["일","월","화","수","목","금","토"];
+  return `${d.getMonth()+1}월 ${d.getDate()}일 (${days[d.getDay()]})`;
+}
+function dateStr(d) { return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; }
+function defaultTableNames(store) {
+  const n={}; for(let i=1;i<=STORES[store].tables;i++) n[i]=`T${i}`; return n;
+}
+function nowTimeStr() {
+  const now=new Date();
+  const hh=String(now.getHours()).padStart(2,"0");
+  const mm=String(Math.floor(now.getMinutes()/30)*30).padStart(2,"0");
+  return `${hh}:${mm}`;
+}
+
+const initialData = {
+  reservations: [],
+  customers: [],
+  tableNames: { 0:defaultTableNames(0) },
+  tableCounts: { 0:14 },
+  nextResId: 1,
+  nextCustId: 1,
+};
+
+const C = {
+  bg:"#f5f5f3",       // 전체 배경 (따뜻한 오프화이트)
+  bg2:"#ffffff",      // 상단바/nav 배경
+  bg3:"#f0ede8",      // 서브 배경
+  card:"#ffffff",     // 카드 배경
+  border:"#e2ddd6",   // 테두리
+  accent:"#c9933a",   // 포인트 (주황/골드 유지)
+  accent2:"#a8721e",  // 포인트 진하게
+  text:"#1a1714",     // 기본 텍스트 (진한 갈색-검정)
+  text2:"#5a5248",    // 보조 텍스트
+  text3:"#9e9188",    // 힌트 텍스트
+  red:"#c0392b",      // 빨강
+  green:"#27855a",    // 초록
+  teal:"#1a8a76",     // 청록
+  purple:"#6a4fa0",   // 보라
+  blue:"#2563a8",     // 파랑 (단골)
+};
+
+function tableIncludes(r, tableNum) {
+  // tables 배열(단체) 또는 단일 table 필드 모두 지원
+  if (Array.isArray(r.tables)) return r.tables.includes(tableNum);
+  return r.table === tableNum;
+}
+
+function getTableDisplay(todayActive, tableNum) {
+  const dining   = todayActive.find(r=>tableIncludes(r,tableNum) && r.status==="dining");
+  const upcoming = todayActive.find(r=>tableIncludes(r,tableNum) && r.status==="upcoming");
+  if (dining) return {
+    cls: dining.walkIn ? "walkin" : "reserved",
+    status: dining.walkIn ? "워크인 🍽️" : "식사 중 🍽️",
+    name: dining.walkIn ? `${dining.pax}명` : dining.name,
+    pax: dining.walkIn ? "" : `${dining.pax}명`,
+    isGroup: Array.isArray(dining.tables) && dining.tables.length > 1,
+  };
+  if (upcoming) return {
+    cls:"upcoming", status:`예약 ${upcoming.time}`, name:upcoming.name, pax:`${upcoming.pax}명`,
+    isGroup: Array.isArray(upcoming.tables) && upcoming.tables.length > 1,
+  };
+  return { cls:"empty", status:"빈 테이블", name:"", pax:"", isGroup:false };
+}
+
+const s = {
+  app:{ fontFamily:"'Noto Sans KR',sans-serif", background:C.bg, color:C.text, minHeight:"100vh", fontSize:14 },
+  topbar:{ background:C.bg2, borderBottom:`1px solid ${C.border}`, padding:"0 16px", display:"flex", alignItems:"center", gap:12, height:56, position:"sticky", top:0, zIndex:100, boxShadow:"0 1px 4px rgba(0,0,0,0.06)" },
+  logo:{ fontFamily:"serif", fontSize:17, color:C.accent, fontWeight:700, whiteSpace:"nowrap" },
+  storeTab:(a)=>({ padding:"6px 14px", borderRadius:20, border:`1px solid ${a?C.accent:C.border}`, background:a?C.accent:"transparent", color:a?"#fff":C.text2, cursor:"pointer", fontSize:13, fontFamily:"inherit", transition:"all 0.2s", whiteSpace:"nowrap", fontWeight:a?600:400 }),
+  nav:{ display:"flex", borderBottom:`1px solid ${C.border}`, background:C.bg2, padding:"0 16px" },
+  navTab:(a)=>({ padding:"13px 20px", border:"none", background:"transparent", color:a?C.accent:C.text2, cursor:"pointer", fontSize:13, fontFamily:"inherit", borderBottom:`2px solid ${a?C.accent:"transparent"}`, transition:"all 0.2s", fontWeight:a?600:400 }),
+  main:{ padding:16, maxWidth:960, margin:"0 auto" },
+  row:{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:14, gap:8, flexWrap:"wrap" },
+  title:{ fontFamily:"serif", fontSize:18, color:C.text, fontWeight:700 },
+  timeBtn:(a)=>({ padding:"5px 12px", borderRadius:20, border:`1px solid ${a?C.accent:C.border}`, background:a?C.accent:"#fff", color:a?"#fff":C.text2, cursor:"pointer", fontSize:12, fontFamily:"inherit", transition:"all 0.2s", fontWeight:a?600:400 }),
+  legend:{ display:"flex", gap:12, marginBottom:14, flexWrap:"wrap" },
+  legendItem:{ display:"flex", alignItems:"center", gap:5, fontSize:12, color:C.text2 },
+  legendDot:(c)=>({ width:8, height:8, borderRadius:"50%", background:c }),
+  tablesGrid:{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(90px,1fr))", gap:8 },
+  tableCard:(cls)=>{
+    const m={
+      empty:  {b:"#d4ead9", bg:"#f7fbf8"},
+      upcoming:{b:"#f5d89a", bg:"#fffbf0"},
+      reserved:{b:"#f5a9a9", bg:"#fff5f5"},
+      walkin:  {b:"#8fd4c8", bg:"#f2fbf9"},
+    };
+    const r=m[cls]||m.empty;
+    return { background:r.bg, border:`1.5px solid ${r.b}`, borderRadius:12, padding:"10px 8px", textAlign:"center", cursor:"pointer", transition:"all 0.2s", boxShadow:"0 1px 3px rgba(0,0,0,0.05)" };
+  },
+  tableNum:{ fontSize:10, color:C.text3, marginBottom:3, fontWeight:500 },
+  tableStatus:(cls)=>({ fontSize:12, fontWeight:600, color:{empty:C.green,upcoming:"#c9933a",reserved:C.red,walkin:C.teal}[cls]||C.text2 }),
+  tableName:{ fontSize:11, color:C.text2, marginTop:2, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" },
+  tablePax:{ fontSize:10, color:C.text3, marginTop:1 },
+  btnPrimary:{ background:C.accent, color:"#fff", border:"none", padding:"9px 18px", borderRadius:20, cursor:"pointer", fontSize:13, fontFamily:"inherit", fontWeight:600, boxShadow:"0 2px 6px rgba(201,147,58,0.3)" },
+  btnWalkIn:{ background:C.teal, color:"#fff", border:"none", padding:"9px 18px", borderRadius:20, cursor:"pointer", fontSize:13, fontFamily:"inherit", fontWeight:600 },
+  btnSecondary:{ background:"#fff", border:`1px solid ${C.border}`, color:C.text2, padding:"9px 16px", borderRadius:20, cursor:"pointer", fontSize:13, fontFamily:"inherit" },
+  btnSm:{ padding:"4px 10px", borderRadius:12, border:`1px solid ${C.border}`, background:"#fff", color:C.text2, cursor:"pointer", fontSize:11, fontFamily:"inherit" },
+  btnSmCancel:{ padding:"4px 10px", borderRadius:12, border:`1px solid #f5a9a9`, background:"#fff5f5", color:C.red, cursor:"pointer", fontSize:11, fontFamily:"inherit" },
+  btnSmSeated:{ padding:"4px 10px", borderRadius:12, border:`1px solid #8fd4c8`, background:"#f2fbf9", color:C.teal, cursor:"pointer", fontSize:11, fontFamily:"inherit" },
+  btnSmDone:{ padding:"4px 10px", borderRadius:12, border:"1px solid #c4aaee", background:"#f7f3ff", color:C.purple, cursor:"pointer", fontSize:11, fontFamily:"inherit" },
+  btnSmMove:{ padding:"4px 10px", borderRadius:12, border:`1px solid #b0cce8`, background:"#f0f6fc", color:C.blue, cursor:"pointer", fontSize:11, fontFamily:"inherit" },
+  dateNav:{ display:"flex", alignItems:"center", gap:10 },
+  dateNavBtn:{ background:"#fff", border:`1px solid ${C.border}`, color:C.text, width:32, height:32, borderRadius:10, cursor:"pointer", fontSize:18, display:"flex", alignItems:"center", justifyContent:"center", boxShadow:"0 1px 3px rgba(0,0,0,0.06)" },
+  resList:{ display:"flex", flexDirection:"column", gap:8 },
+  noRes:{ textAlign:"center", padding:"50px 20px", color:C.text3 },
+  searchInput:{ flex:1, background:"#fff", border:`1px solid ${C.border}`, borderRadius:20, padding:"9px 16px", color:C.text, fontSize:13, fontFamily:"inherit", outline:"none", boxShadow:"0 1px 3px rgba(0,0,0,0.05)" },
+  custGrid:{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(270px,1fr))", gap:10 },
+  custCard:{ background:"#fff", border:`1px solid ${C.border}`, borderRadius:12, padding:14, cursor:"pointer", boxShadow:"0 1px 4px rgba(0,0,0,0.06)" },
+  custTop:{ display:"flex", alignItems:"center", gap:10, marginBottom:10 },
+  custAvatar:{ width:38, height:38, borderRadius:"50%", background:C.bg3, border:`1px solid ${C.border}`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:18 },
+  custName:{ fontSize:14, fontWeight:600, color:C.text },
+  custPhone:{ fontSize:12, color:C.text2 },
+  custStats:{ display:"flex", gap:10, paddingTop:10, borderTop:`1px solid ${C.border}` },
+  custStat:{ textAlign:"center", flex:1 },
+  custStatNum:{ fontSize:16, fontWeight:700, color:C.accent },
+  custStatLabel:{ fontSize:10, color:C.text3, marginTop:1 },
+  custMemo:{ marginTop:8, fontSize:11, color:C.text2, background:C.bg3, borderRadius:6, padding:"5px 9px", borderLeft:`3px solid ${C.accent}` },
+  vipBadge:{ display:"inline-block", background:C.accent, color:"#fff", fontSize:9, padding:"2px 6px", borderRadius:10, marginLeft:5, fontWeight:700, verticalAlign:"middle" },
+  overlay:{ position:"fixed", inset:0, background:"rgba(0,0,0,0.45)", zIndex:200, display:"flex", alignItems:"center", justifyContent:"center", padding:16 },
+  modal:{ background:"#fff", border:`1px solid ${C.border}`, borderRadius:16, padding:24, width:"100%", maxWidth:420, maxHeight:"90vh", overflowY:"auto", boxShadow:"0 8px 32px rgba(0,0,0,0.12)" },
+  modalTitle:{ fontFamily:"serif", fontSize:18, color:C.text, fontWeight:700, marginBottom:18 },
+  formGroup:{ marginBottom:12 },
+  formLabel:{ display:"block", fontSize:12, color:C.text2, marginBottom:5, fontWeight:500 },
+  formInput:{ width:"100%", background:"#f8f7f5", border:`1px solid ${C.border}`, borderRadius:10, padding:"10px 12px", color:C.text, fontSize:13, fontFamily:"inherit", outline:"none", boxSizing:"border-box" },
+  formRow:{ display:"flex", gap:10 },
+  modalActions:{ display:"flex", gap:8, marginTop:18 },
+};
+
+// ── 공통 ──────────────────────────────────────────────────
+function Modal({ open, onClose, title, children }) {
+  if (!open) return null;
+  return (
+    <div style={s.overlay} onClick={e=>e.target===e.currentTarget&&onClose()}>
+      <div style={s.modal}><div style={s.modalTitle}>{title}</div>{children}</div>
+    </div>
+  );
+}
+function FI({ label, ...p }) {
+  return <div style={s.formGroup}>{label&&<label style={s.formLabel}>{label}</label>}<input style={s.formInput} {...p}/></div>;
+}
+function FS({ label, options, ...p }) {
+  return <div style={s.formGroup}>{label&&<label style={s.formLabel}>{label}</label>}<select style={{...s.formInput}} {...p}>{options.map(o=><option key={o.value??o} value={o.value??o}>{o.label??o}</option>)}</select></div>;
+}
+function FT({ label, ...p }) {
+  return <div style={s.formGroup}>{label&&<label style={s.formLabel}>{label}</label>}<textarea style={{...s.formInput,height:76,resize:"vertical"}} {...p}/></div>;
+}
+function Toast({ msg }) {
+  if (!msg) return null;
+  return <div style={{position:"fixed",bottom:24,left:"50%",transform:"translateX(-50%)",background:C.card,border:`1px solid ${C.accent}`,color:C.text,padding:"9px 20px",borderRadius:20,fontSize:13,zIndex:999,whiteSpace:"nowrap",pointerEvents:"none"}}>{msg}</div>;
+}
+
+// ── 뱃지 ──────────────────────────────────────────────────
+function StatusBadge({ status }) {
+  const map = {
+    upcoming:{ bg:"#3a2a10", color:C.accent, label:"예약" },
+    dining:  { bg:"#3a1010", color:"#ff9090", label:"🍽️ 식사중" },
+    done:    { bg:"#2a2040", color:"#c4a0ff", label:"✅ 식사완료" },
+  };
+  const m = map[status]; if(!m) return null;
+  return <span style={{fontSize:10,background:m.bg,color:m.color,padding:"1px 7px",borderRadius:10,marginLeft:6}}>{m.label}</span>;
+}
+
+// ── WalkInModal ───────────────────────────────────────────
+function WalkInModal({ open, onClose, onSave, store, tableNames, tableCount, defaultTable }) {
+  const n = tableCount||STORES[store].tables;
+  const opts = Array.from({length:n},(_,i)=>({value:i+1,label:tableNames[i+1]||`T${i+1}`}));
+  const [pax, setPax] = useState(null);
+  const [table, setTable] = useState(1);
+  useEffect(()=>{ if(open){ setPax(null); setTable(defaultTable||1); } },[open,defaultTable]);
+  return (
+    <Modal open={open} onClose={onClose} title="🚶 워크인 등록">
+      <div style={{color:C.text2,fontSize:12,marginBottom:18}}>예약 없이 바로 방문한 손님을 빠르게 등록합니다.</div>
+      <div style={s.formGroup}>
+        <label style={s.formLabel}>인원 *</label>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginBottom:8}}>
+          {[1,2,3,4,5,6,7,8].map(p=>(
+            <button key={p} onClick={()=>setPax(p)} style={{padding:"12px 0",borderRadius:8,border:`1px solid ${pax===p?C.teal:C.border}`,background:pax===p?C.teal:C.card,color:pax===p?"#fff":C.text2,cursor:"pointer",fontSize:16,fontWeight:pax===p?700:400,fontFamily:"inherit",transition:"all 0.15s"}}>{p}명</button>
+          ))}
+        </div>
+        <input style={{...s.formInput,fontSize:13}} type="number" min="1" max="50" value={pax&&pax>8?pax:""} onChange={e=>setPax(parseInt(e.target.value)||null)} placeholder="9명 이상은 직접 입력"/>
+      </div>
+      <FS label="테이블" value={table} onChange={e=>setTable(e.target.value)} options={opts}/>
+      <div style={s.modalActions}>
+        <button style={{...s.btnSecondary,flex:1}} onClick={onClose}>취소</button>
+        <button style={{...s.btnWalkIn,flex:1,opacity:(!pax||pax<1)?0.5:1}} onClick={()=>{ if(!pax||pax<1)return; onSave({pax,table:parseInt(table)}); }}>등록하기</button>
+      </div>
+    </Modal>
+  );
+}
+
+// ── TableNamesModal ───────────────────────────────────────
+function TableNamesModal({ open, onClose, onSave, store, tableNames, tableCount }) {
+  const [count, setCount] = useState(tableCount||STORES[store].tables);
+  const [names, setNames] = useState({});
+
+  useEffect(()=>{
+    if(open){
+      setCount(tableCount||STORES[store].tables);
+      setNames({...tableNames});
+    }
+  },[open, tableNames, tableCount]);
+
+  const addTable = () => setCount(c => c + 1);
+  const removeTable = () => {
+    if(count <= 1) return;
+    setCount(c => {
+      const next = c - 1;
+      setNames(p => { const n={...p}; delete n[next+1]; return n; });
+      return next;
+    });
+  };
+
+  return (
+    <Modal open={open} onClose={onClose} title="⚙️ 설정">
+      {/* 테이블 수 조절 */}
+      <div style={{marginBottom:18}}>
+        <label style={s.formLabel}>테이블 수</label>
+        <div style={{display:"flex",alignItems:"center",gap:12,marginTop:6}}>
+          <button onClick={removeTable} disabled={count<=1}
+            style={{width:36,height:36,borderRadius:8,border:`1px solid ${C.border}`,background:C.card,color:count<=1?C.text3:C.red,fontSize:20,cursor:count<=1?"not-allowed":"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"inherit"}}>
+            −
+          </button>
+          <div style={{fontSize:22,fontWeight:700,color:C.accent,minWidth:32,textAlign:"center"}}>{count}</div>
+          <button onClick={addTable}
+            style={{width:36,height:36,borderRadius:8,border:`1px solid ${C.border}`,background:C.card,color:C.green,fontSize:20,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"inherit"}}>
+            +
+          </button>
+          <span style={{fontSize:12,color:C.text3}}>개</span>
+        </div>
+      </div>
+
+      {/* 테이블 이름 */}
+      <div style={{marginBottom:14}}>
+        <label style={s.formLabel}>테이블 이름 (선택)</label>
+        <div style={{color:C.text3,fontSize:11,marginBottom:8}}>비워두면 T1, T2... 로 표시돼요</div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,maxHeight:260,overflowY:"auto",paddingRight:4}}>
+          {Array.from({length:count},(_,i)=>i+1).map(i=>(
+            <div key={i} style={{display:"flex",alignItems:"center",gap:6}}>
+              <span style={{fontSize:11,color:C.text3,minWidth:22,flexShrink:0}}>T{i}</span>
+              <input
+                style={{...s.formInput,padding:"6px 9px",fontSize:12}}
+                value={names[i]||""}
+                onChange={e=>setNames(p=>({...p,[i]:e.target.value}))}
+                placeholder={`T${i}`}
+              />
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div style={s.modalActions}>
+        <button style={{...s.btnSecondary,flex:1}} onClick={onClose}>취소</button>
+        <button style={{...s.btnPrimary,flex:1}} onClick={()=>onSave(names, count)}>저장</button>
+      </div>
+    </Modal>
+  );
+}
+
+// ── SeatsPage ─────────────────────────────────────────────
+// ── 공통 DateNav ─────────────────────────────────────────
+// ── 커스텀 달력 피커 ─────────────────────────────────────
+function CalendarPicker({ viewDate, onSelect, onClose, reservations, store }) {
+  const [calYear, setCalYear] = useState(viewDate.getFullYear());
+  const [calMonth, setCalMonth] = useState(viewDate.getMonth());
+  const todayDs = dateStr(new Date());
+
+  const firstDay = new Date(calYear, calMonth, 1).getDay();
+  const daysInMonth = new Date(calYear, calMonth + 1, 0).getDate();
+  const monthNames = ["1월","2월","3월","4월","5월","6월","7월","8월","9월","10월","11월","12월"];
+  const dayNames = ["일","월","화","수","목","금","토"];
+
+  const prevMonth = () => { if(calMonth===0){setCalMonth(11);setCalYear(y=>y-1);}else setCalMonth(m=>m-1); };
+  const nextMonth = () => { if(calMonth===11){setCalMonth(0);setCalYear(y=>y+1);}else setCalMonth(m=>m+1); };
+
+  const cells = [];
+  for(let i=0;i<firstDay;i++) cells.push(null);
+  for(let d=1;d<=daysInMonth;d++) cells.push(d);
+
+  const selectedDs = dateStr(viewDate);
+
+  // 해당 월의 날짜별 예약 집계 (done 제외)
+  const resMap = {};
+  (reservations||[]).filter(r=>r.store===store && r.status!=="done").forEach(r=>{
+    if(!resMap[r.date]) resMap[r.date]={teams:0,pax:0};
+    resMap[r.date].teams += 1;
+    resMap[r.date].pax   += r.pax;
+  });
+
+  return (
+    <div style={{position:"fixed",inset:0,zIndex:300,display:"flex",alignItems:"center",justifyContent:"center",padding:16,background:"rgba(0,0,0,0.6)"}} onClick={onClose}>
+      <div style={{background:C.bg2,border:`1px solid ${C.border}`,borderRadius:16,padding:20,width:340,boxShadow:"0 16px 48px rgba(0,0,0,0.6)"}} onClick={e=>e.stopPropagation()}>
+        {/* 헤더 */}
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16}}>
+          <button onClick={prevMonth} style={{background:C.card,border:`1px solid ${C.border}`,color:C.text,width:32,height:32,borderRadius:8,cursor:"pointer",fontSize:16,display:"flex",alignItems:"center",justifyContent:"center"}}>‹</button>
+          <div style={{fontFamily:"serif",fontSize:17,color:C.accent,fontWeight:600}}>{calYear}년 {monthNames[calMonth]}</div>
+          <button onClick={nextMonth} style={{background:C.card,border:`1px solid ${C.border}`,color:C.text,width:32,height:32,borderRadius:8,cursor:"pointer",fontSize:16,display:"flex",alignItems:"center",justifyContent:"center"}}>›</button>
+        </div>
+        {/* 요일 헤더 */}
+        <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:3,marginBottom:4}}>
+          {dayNames.map((d,i)=>(
+            <div key={d} style={{textAlign:"center",fontSize:11,color:i===0?C.red:i===6?"#4a6eb0":C.text3,padding:"3px 0",fontWeight:500}}>{d}</div>
+          ))}
+        </div>
+        {/* 날짜 셀 */}
+        <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:3}}>
+          {cells.map((d,i)=>{
+            if(!d) return <div key={i}/>;
+            const ds = `${calYear}-${String(calMonth+1).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
+            const isSelected = ds===selectedDs;
+            const isToday    = ds===todayDs;
+            const isWeekend  = (i%7===0||i%7===6);
+            const info       = resMap[ds];
+            const hasRes     = !!info;
+
+            return (
+              <button key={i} onClick={()=>{ onSelect(new Date(calYear,calMonth,d)); onClose(); }}
+                style={{
+                  width:"100%", minHeight:52, border:"none", borderRadius:8,
+                  cursor:"pointer", fontFamily:"inherit", padding:"5px 2px 4px",
+                  background: isSelected ? C.accent : isToday ? "#fffbf0" : hasRes ? "#231f18" : "transparent",
+                  outline: isToday && !isSelected ? `1px solid ${C.accent}` : "none",
+                  transition:"background 0.15s",
+                  display:"flex", flexDirection:"column", alignItems:"center", gap:2,
+                }}
+              >
+                {/* 날짜 숫자 */}
+                <span style={{
+                  fontSize:13,
+                  fontWeight: isSelected||isToday ? 700 : 400,
+                  color: isSelected?"#fff": isToday?C.accent2: isWeekend?(i%7===0?C.red:"#4a6eb0"):C.text,
+                  lineHeight:1,
+                }}>{d}</span>
+                {/* 예약 정보 */}
+                {hasRes && (
+                  <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:1,width:"100%"}}>
+                    <span style={{
+                      fontSize:9, fontWeight:600, lineHeight:1,
+                      color: isSelected?"rgba(255,255,255,0.9)":C.accent2,
+                    }}>{info.teams}팀</span>
+                    <span style={{
+                      fontSize:9, lineHeight:1,
+                      color: isSelected?"rgba(255,255,255,0.75)":C.text3,
+                    }}>{info.pax}명</span>
+                  </div>
+                )}
+              </button>
+            );
+          })}
+        </div>
+        {/* 범례 + 오늘 */}
+        <div style={{marginTop:14,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+          <div style={{display:"flex",alignItems:"center",gap:6,fontSize:10,color:C.text3}}>
+            <div style={{width:8,height:8,borderRadius:2,background:C.accent2}}/>
+            <span>예약 있는 날</span>
+          </div>
+          <button onClick={()=>{ onSelect(new Date()); onClose(); }} style={{background:"transparent",border:`1px solid ${C.teal}`,color:C.teal,padding:"5px 16px",borderRadius:8,cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>
+            오늘로 이동
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DateNav({ viewDate, setViewDate, reservations, store }) {
+  const [showCal, setShowCal] = useState(false);
+  const ds = dateStr(viewDate);
+  const isToday = ds === todayStr();
+  return (
+    <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+      <div style={s.dateNav}>
+        <button style={s.dateNavBtn} onClick={()=>setViewDate(d=>new Date(d.getTime()-86400000))}>‹</button>
+        <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
+          <div style={{fontSize:15,fontWeight:500,minWidth:130,textAlign:"center"}}>{formatDate(viewDate)}</div>
+          {isToday && <span style={{fontSize:10,color:C.teal,fontWeight:600}}>● 오늘</span>}
+        </div>
+        <button style={s.dateNavBtn} onClick={()=>setViewDate(d=>new Date(d.getTime()+86400000))}>›</button>
+      </div>
+      {!isToday && (
+        <button onClick={()=>setViewDate(new Date())} style={{background:"transparent",border:`1px solid ${C.teal}`,color:C.teal,padding:"4px 10px",borderRadius:8,cursor:"pointer",fontSize:11,fontFamily:"inherit"}}>
+          오늘
+        </button>
+      )}
+      <button onClick={()=>setShowCal(true)} style={{background:"transparent",border:`1px solid ${C.border}`,color:C.text2,padding:"4px 10px",borderRadius:8,cursor:"pointer",fontSize:11,fontFamily:"inherit",display:"flex",alignItems:"center",gap:4}}>
+        📅 날짜 선택
+      </button>
+      {showCal && <CalendarPicker viewDate={viewDate} onSelect={setViewDate} onClose={()=>setShowCal(false)} reservations={reservations} store={store}/>}
+    </div>
+  );
+}
+
+function SeatsPage({ store, reservations, tableNames, tableCount, onTableClick, onOpenTableNames, onSwapTables, onOpenGroup }) {
+  const [viewDate, setViewDate] = useState(new Date());
+  const [swapMode, setSwapMode] = useState(false);
+  const [swapFrom, setSwapFrom] = useState(null);
+  const [multiMode, setMultiMode] = useState(false);   // 다중선택 모드
+  const [multiSel, setMultiSel] = useState([]);         // 선택된 테이블 목록
+
+  const ds = dateStr(viewDate);
+  const activeRes = reservations.filter(r=>r.store===store && r.date===ds && r.status!=="done");
+
+  // ── 길게 누르기 지원 ──
+  const pressTimer = useRef(null);
+
+  const handlePressStart = (n) => {
+    pressTimer.current = setTimeout(()=>{
+      // 길게 누르기 → 다중선택 모드 진입 + 해당 테이블 첫 선택
+      setMultiMode(true);
+      setSwapMode(false); setSwapFrom(null);
+      setMultiSel([n]);
+    }, 500);
+  };
+
+  const handlePressEnd = () => { clearTimeout(pressTimer.current); };
+
+  const handleTableClick = (n) => {
+    // 다중선택 모드
+    if (multiMode) {
+      setMultiSel(prev =>
+        prev.includes(n) ? prev.filter(x=>x!==n) : [...prev, n]
+      );
+      return;
+    }
+    // 이동(swap) 모드
+    if (swapMode) {
+      if (swapFrom === null) { setSwapFrom(n); return; }
+      if (swapFrom === n)    { setSwapFrom(null); return; }
+      onSwapTables(swapFrom, n, ds);
+      setSwapFrom(null); setSwapMode(false);
+      return;
+    }
+    // 일반 클릭
+    onTableClick(n, ds);
+  };
+
+  const cancelMulti = () => { setMultiMode(false); setMultiSel([]); };
+  const cancelSwap  = () => { setSwapMode(false); setSwapFrom(null); };
+
+  const openGroupWithSel = (mode) => {
+    onOpenGroup(ds, multiSel, mode);
+    setMultiMode(false); setMultiSel([]);
+  };
+
+  return (
+    <div>
+      {/* 상단 바 */}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,gap:8,flexWrap:"wrap"}}>
+        <DateNav viewDate={viewDate} setViewDate={setViewDate} reservations={reservations} store={store}/>
+        <div style={{display:"flex",gap:6}}>
+          <button
+            onClick={()=>{ setSwapMode(m=>!m); setSwapFrom(null); setMultiMode(false); setMultiSel([]); }}
+            style={{background:swapMode?"#e8f0f8":"transparent",border:`1px solid ${swapMode?"#b0cce8":C.border}`,color:swapMode?C.blue:C.text2,padding:"5px 12px",borderRadius:8,cursor:"pointer",fontSize:12,fontFamily:"inherit",fontWeight:swapMode?600:400,transition:"all 0.2s"}}
+          >
+            🔀 이동{swapMode?" 중...":""}
+          </button>
+          <button onClick={onOpenTableNames} style={{background:"transparent",border:`1px solid ${C.border}`,color:C.text2,padding:"5px 12px",borderRadius:8,cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>
+            ⚙️ 설정
+          </button>
+        </div>
+      </div>
+
+      {/* 이동 모드 배너 */}
+      {swapMode && (
+        <div style={{background:"#f0f6fc",border:"1px solid #b0cce8",borderRadius:10,padding:"10px 16px",marginBottom:12,display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
+          <div style={{fontSize:13,color:"#7ab8e8"}}>
+            {swapFrom===null ? "① 옮길 테이블을 선택하세요" : `② ${tableNames[swapFrom]||`T${swapFrom}`} 선택됨 → 바꿀 테이블을 선택하세요`}
+          </div>
+          <button onClick={cancelSwap} style={{background:"transparent",border:"1px solid #4a7fa8",color:"#7ab8e8",padding:"4px 12px",borderRadius:6,cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>취소</button>
+        </div>
+      )}
+
+      {/* 다중선택 모드 배너 */}
+      {multiMode && (
+        <div style={{background:"#fffbf0",border:"1px solid #f5d89a",borderRadius:10,padding:"10px 16px",marginBottom:12}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,marginBottom:multiSel.length>0?10:0}}>
+            <div style={{fontSize:13,color:C.accent}}>
+              👥 단체 모드 — 테이블을 탭해서 선택하세요
+              {multiSel.length>0 && <span style={{marginLeft:8,fontWeight:700}}>{multiSel.sort((a,b)=>a-b).map(t=>tableNames[t]||`T${t}`).join(" + ")}</span>}
+            </div>
+            <button onClick={cancelMulti} style={{background:"transparent",border:`1px solid ${C.border}`,color:C.text2,padding:"4px 14px",borderRadius:6,cursor:"pointer",fontSize:12,fontFamily:"inherit",whiteSpace:"nowrap"}}>취소</button>
+          </div>
+          {multiSel.length>=1 && (
+            <div style={{display:"flex",gap:8}}>
+              <button
+                onClick={()=>openGroupWithSel('walkin')}
+                style={{flex:1,background:C.teal,color:"#fff",border:"none",borderRadius:8,padding:"10px",cursor:"pointer",fontFamily:"inherit",fontSize:13,fontWeight:600}}
+              >
+                🚶 워크인 등록
+              </button>
+              <button
+                onClick={()=>openGroupWithSel('reservation')}
+                style={{flex:1,background:C.accent,color:"#fff",border:"none",borderRadius:8,padding:"10px",cursor:"pointer",fontFamily:"inherit",fontSize:13,fontWeight:600}}
+              >
+                📋 예약 추가
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* 범례 + 요약 */}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14,flexWrap:"wrap",gap:8}}>
+        <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+          <div style={s.legend}>
+            {[["빈 테이블",C.green],["예약 있음",C.accent],["식사 중",C.red],["워크인",C.teal]].map(([l,c])=>(
+              <div key={l} style={s.legendItem}><div style={s.legendDot(c)}/>{l}</div>
+            ))}
+          </div>
+          {!multiMode && <div style={{fontSize:11,color:C.text3}}>길게 누르면 단체 선택</div>}
+        </div>
+        {(()=>{
+          const active = activeRes.filter(r=>r.status!=="done");
+          // groupId 기준으로 중복 제거한 팀 수
+          const seen = new Set(); let teams=0;
+          active.forEach(r=>{ const key=r.groupId?`g${r.groupId}`:`r${r.id}`; if(!seen.has(key)){seen.add(key);teams++;} });
+          const pax    = active.reduce((s,r)=>s+r.pax,0);
+          const dining = active.filter(r=>r.status==="dining").length;
+          const upcoming = active.filter(r=>r.status==="upcoming").length;
+          if(teams===0) return <div style={{fontSize:12,color:C.text3}}>예약 없음</div>;
+          return (
+            <div style={{background:C.bg3,border:`1px solid ${C.border}`,borderRadius:10,padding:"6px 14px",display:"flex",gap:12,alignItems:"center"}}>
+              <div style={{textAlign:"center"}}><div style={{fontSize:18,fontWeight:700,color:C.accent,lineHeight:1}}>{teams}</div><div style={{fontSize:10,color:C.text3,marginTop:2}}>팀</div></div>
+              <div style={{width:1,height:28,background:C.border}}/>
+              <div style={{textAlign:"center"}}><div style={{fontSize:18,fontWeight:700,color:C.accent,lineHeight:1}}>{pax}</div><div style={{fontSize:10,color:C.text3,marginTop:2}}>명</div></div>
+              {dining>0&&<><div style={{width:1,height:28,background:C.border}}/><div style={{textAlign:"center"}}><div style={{fontSize:14,fontWeight:600,color:C.red,lineHeight:1}}>{dining}</div><div style={{fontSize:10,color:C.text3,marginTop:2}}>식사중</div></div></>}
+              {upcoming>0&&<><div style={{width:1,height:28,background:C.border}}/><div style={{textAlign:"center"}}><div style={{fontSize:14,fontWeight:600,color:C.accent,lineHeight:1}}>{upcoming}</div><div style={{fontSize:10,color:C.text3,marginTop:2}}>예약대기</div></div></>}
+            </div>
+          );
+        })()}
+      </div>
+
+      {/* 테이블 그리드 */}
+      <div style={s.tablesGrid}>
+        {Array.from({length:tableCount},(_,i)=>i+1).map(n=>{
+          const { cls, status, name, pax, isGroup } = getTableDisplay(activeRes, n);
+          const tName = tableNames[n]||`T${n}`;
+          const isSwapFrom   = swapMode && swapFrom===n;
+          const isMultiSel   = multiMode && multiSel.includes(n);
+          const baseStyle    = s.tableCard(cls);
+
+          const cardStyle = isMultiSel
+            ? {...baseStyle, border:`2px solid ${C.accent}`, background:"#fffbf0", transform:"scale(1.04)"}
+            : isSwapFrom
+              ? {...baseStyle, border:"2px solid #4a7fa8", background:"#f0f6fc", transform:"scale(1.04)"}
+              : swapMode && swapFrom!==null
+                ? {...baseStyle, border:"2px dashed #4a7fa8", opacity:0.85}
+                : swapMode || multiMode
+                  ? {...baseStyle, opacity: multiMode&&!isMultiSel ? 0.75 : 1}
+                  : baseStyle;
+
+          return (
+            <div
+              key={n}
+              style={{...cardStyle, transition:"all 0.15s", userSelect:"none"}}
+              onClick={()=>handleTableClick(n)}
+              onMouseDown={()=>handlePressStart(n)}
+              onMouseUp={handlePressEnd}
+              onMouseLeave={handlePressEnd}
+              onTouchStart={()=>handlePressStart(n)}
+              onTouchEnd={handlePressEnd}
+            >
+              <div style={s.tableNum}>{tName}</div>
+              {isMultiSel && <div style={{fontSize:9,color:C.accent,marginBottom:2,fontWeight:700}}>✓ 선택</div>}
+              {isSwapFrom && <div style={{fontSize:9,color:"#7ab8e8",marginBottom:2,fontWeight:700}}>선택됨</div>}
+              {isGroup && !isMultiSel && <div style={{fontSize:9,color:C.accent,marginBottom:1,fontWeight:700}}>👥</div>}
+              <div style={s.tableStatus(isSwapFrom?"reserved":cls)}>{status}</div>
+              {name&&<div style={s.tableName}>{name}</div>}
+              {pax&&<div style={s.tablePax}>{pax}</div>}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ── ReservationsPage ──────────────────────────────────────
+function ReservationsPage({ store, reservations, tableNames, onAdd, onWalkIn, onEdit, onCancel, onSetStatus, confirmCancel, onConfirmCancel, onDismissCancel, onMove, onOpenGroup }) {
+  const [viewDate, setViewDate] = useState(new Date());
+  const ds = dateStr(viewDate);
+  const list = reservations.filter(r=>r.store===store&&r.date===ds).sort((a,b)=>{
+    if(a.status==="done" && b.status!=="done") return 1;
+    if(b.status==="done" && a.status!=="done") return -1;
+    return a.time.localeCompare(b.time);
+  });
+
+  const activeList  = list.filter(r=>r.status!=="done");
+  const totalTeams  = activeList.length;
+  const totalPax    = activeList.reduce((s,r)=>s+r.pax, 0);
+  const diningCount = activeList.filter(r=>r.status==="dining").length;
+  const upcomingCount = activeList.filter(r=>r.status==="upcoming").length;
+
+  return (
+    <div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8,gap:8,flexWrap:"wrap"}}>
+        <DateNav viewDate={viewDate} setViewDate={setViewDate} reservations={reservations} store={store}/>
+        <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+          <button style={{...s.btnSecondary,borderColor:C.border}} onClick={()=>onOpenGroup(ds)}>👥 단체</button>
+          <button style={s.btnWalkIn} onClick={()=>onWalkIn(ds)}>🚶 워크인</button>
+          <button style={s.btnPrimary} onClick={()=>onAdd(ds)}>+ 예약 추가</button>
+        </div>
+      </div>
+      {/* 예약 요약 바 */}
+      {totalTeams > 0 ? (
+        <div style={{background:C.bg3,border:`1px solid ${C.border}`,borderRadius:10,padding:"10px 16px",marginBottom:14,display:"flex",alignItems:"center",gap:0,flexWrap:"wrap"}}>
+          <div style={{display:"flex",alignItems:"center",gap:16,flex:1,flexWrap:"wrap"}}>
+            <div style={{display:"flex",alignItems:"baseline",gap:4}}>
+              <span style={{fontSize:22,fontWeight:700,color:C.accent}}>{totalTeams}</span>
+              <span style={{fontSize:12,color:C.text3}}>팀</span>
+              <span style={{fontSize:18,color:C.border,margin:"0 4px"}}>/</span>
+              <span style={{fontSize:22,fontWeight:700,color:C.accent}}>{totalPax}</span>
+              <span style={{fontSize:12,color:C.text3}}>명</span>
+            </div>
+            <div style={{display:"flex",gap:10}}>
+              {diningCount>0 && <div style={{display:"flex",alignItems:"center",gap:4,fontSize:12}}><span style={{width:8,height:8,borderRadius:2,background:C.red,display:"inline-block"}}/>식사중 <b style={{color:C.text}}>{diningCount}팀</b></div>}
+              {upcomingCount>0 && <div style={{display:"flex",alignItems:"center",gap:4,fontSize:12,color:C.text2}}><span style={{width:8,height:8,borderRadius:2,background:C.accent,display:"inline-block"}}/>예약대기 <b style={{color:C.text}}>{upcomingCount}팀</b></div>}
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div style={{marginBottom:14}}/>
+      )}
+      <div style={s.resList}>
+        {list.length===0
+          ? <div style={s.noRes}>📭<br/><br/>이 날 예약이 없습니다</div>
+          : list.map(r=>{
+            const tName = tableNames[r.table]||`T${r.table}`;
+            const isDone=r.status==="done", isDining=r.status==="dining", isUpcoming=r.status==="upcoming";
+            const cardBg = isDone?"#f5f3ff":r.walkIn?"#f0fbf9":C.card;
+            const cardBorder = isDone?"#5a4a8a":r.walkIn?C.teal:C.border;
+            return (
+              <div key={r.id} style={{background:cardBg,border:`1px solid ${cardBorder}`,borderRadius:10,padding:"12px 14px",display:"flex",alignItems:"center",gap:12}}>
+                <div style={{fontSize:17,fontWeight:700,color:isDone?C.text3:C.accent,minWidth:48,fontFamily:"serif",textDecoration:isDone?"line-through":"none"}}>{r.time}</div>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontSize:14,fontWeight:500,marginBottom:2,display:"flex",alignItems:"center",flexWrap:"wrap",gap:2}}>
+                    {r.walkIn
+                      ? <><span style={{color:C.teal,fontWeight:700}}>{Array.isArray(r.tables)&&r.tables.length>1?"👥 단체 워크인":"워크인"}</span><span style={{fontWeight:700}}> {r.pax}명</span></>
+                      : <>{r.name} <span style={{fontSize:12,color:C.text2,fontWeight:400}}>{r.pax}명</span>{Array.isArray(r.tables)&&r.tables.length>1&&<span style={{fontSize:10,color:C.accent,marginLeft:4}}>👥 {r.tables.map(t=>tableNames[t]||`T${t}`).join("+")}</span>}</>
+                    }
+                    <StatusBadge status={r.status}/>
+                  </div>
+                  <div style={{fontSize:11,color:C.text2,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                    {r.walkIn?"직접 방문":(r.phone||"전화번호 없음")+(r.memo?" · "+r.memo:"")}
+                  </div>
+                </div>
+                <div style={{fontSize:11,background:C.bg3,border:`1px solid ${C.border}`,borderRadius:6,padding:"3px 9px",color:C.text2,whiteSpace:"nowrap"}}>
+                  {Array.isArray(r.tables)&&r.tables.length>1 ? r.tables.map(t=>tableNames[t]||`T${t}`).join("+") : tName}
+                </div>
+                <div style={{display:"flex",gap:5,flexWrap:"wrap"}} onClick={e=>e.stopPropagation()}>
+                  {isUpcoming && <button style={s.btnSmSeated} onClick={()=>onSetStatus(r.id,"dining")}>🪑 착석</button>}
+                  {isDining   && <button style={s.btnSmDone}   onClick={()=>onSetStatus(r.id,"done")}>✅ 식사완료</button>}
+                  {!isDone && <button style={s.btnSmMove} onClick={()=>onMove(r)}>예약 변경</button>}
+                  <button style={s.btnSmCancel} onClick={()=>onCancel(r.id)}>{isDone?"삭제":"취소"}</button>
+                </div>
+              </div>
+            );
+          })
+        }
+      </div>
+
+      {/* 취소 확인 인라인 모달 */}
+      {confirmCancel && (
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.7)",zIndex:300,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+          <div style={{background:C.bg2,border:`1px solid ${C.border}`,borderRadius:14,padding:24,maxWidth:320,width:"100%",textAlign:"center"}}>
+            <div style={{fontSize:28,marginBottom:12}}>{confirmCancel.isDone?"🗑️":"❌"}</div>
+            <div style={{fontSize:15,fontWeight:600,marginBottom:8}}>{confirmCancel.isDone?"기록을 삭제할까요?":"예약을 취소할까요?"}</div>
+            <div style={{fontSize:12,color:C.text2,marginBottom:20}}>{confirmCancel.isDone?"삭제된 기록은 복구할 수 없어요.":"취소된 예약은 복구할 수 없어요."}</div>
+            <div style={{display:"flex",gap:10}}>
+              <button style={{flex:1,background:"transparent",border:`1px solid ${C.border}`,color:C.text2,padding:"10px",borderRadius:8,cursor:"pointer",fontFamily:"inherit",fontSize:13}} onClick={onDismissCancel}>
+                돌아가기
+              </button>
+              <button style={{flex:1,background:C.red,color:"#fff",border:"none",padding:"10px",borderRadius:8,cursor:"pointer",fontFamily:"inherit",fontSize:13,fontWeight:600}} onClick={()=>onConfirmCancel(confirmCancel.id, confirmCancel.isDone)}>
+                {confirmCancel.isDone?"삭제":"취소 확정"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── CustomersPage ─────────────────────────────────────────
+function CustomersPage({ store, customers, onAdd, onEdit }) {
+  const [q, setQ] = useState("");
+  const list = customers
+    .filter(c=>c.store===store)
+    .filter(c=>!q||c.name.includes(q)||(c.phone||"").includes(q))
+    .sort((a,b)=>b.visits-a.visits);
+
+  return (
+    <div>
+      {/* 검색 + 추가 */}
+      <div style={s.row}>
+        <input style={{...s.searchInput,flex:1}} placeholder="이름 또는 전화번호 검색..." value={q} onChange={e=>setQ(e.target.value)}/>
+        <button style={s.btnPrimary} onClick={onAdd}>+ 고객 추가</button>
+      </div>
+
+      {/* 헤더 */}
+      {list.length>0 && (
+        <div style={{display:"grid",gridTemplateColumns:"80px 1fr 56px 90px 20px",gap:8,padding:"5px 14px",marginBottom:2}}>
+          <span style={{fontSize:11,color:C.text3}}>고객명</span>
+          <span style={{fontSize:11,color:C.text3}}>전화번호</span>
+          <span style={{fontSize:11,color:C.text3,textAlign:"center"}}>방문</span>
+          <span style={{fontSize:11,color:C.text3,textAlign:"center"}}>최근방문</span>
+          <span/>
+        </div>
+      )}
+
+      {/* 리스트 */}
+      <div style={{display:"flex",flexDirection:"column",gap:4}}>
+        {list.length===0
+          ? <div style={{color:C.text3,padding:40,textAlign:"center"}}>고객 정보 없음</div>
+          : list.map(c=>{
+            const isVip = c.visits>=5;
+            return (
+              <div key={c.id} onClick={()=>onEdit(c)} style={{
+                display:"grid",
+                gridTemplateColumns:"80px 1fr 56px 90px 20px",
+                gap:8,
+                alignItems:"center",
+                background:C.card,
+                border:`1px solid ${isVip?"#b0cce8":C.border}`,
+                borderRadius:10,
+                padding:"11px 14px",
+                cursor:"pointer",
+                transition:"border-color 0.15s",
+              }}>
+                {/* 고객명 */}
+                <div style={{display:"flex",alignItems:"center",gap:4,minWidth:0}}>
+                  <span style={{fontSize:13,fontWeight:500,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{c.name}</span>
+                  {isVip && <span style={s.vipBadge}>단골</span>}
+                </div>
+
+                {/* 전화번호 */}
+                <div style={{fontSize:13,color:C.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                  {c.phone||"번호 없음"}
+                </div>
+
+                {/* 방문 횟수 */}
+                <div style={{textAlign:"center",fontSize:13,fontWeight:500,color:C.accent}}>
+                  {c.visits}회
+                </div>
+
+                {/* 최근 방문일 */}
+                <div style={{textAlign:"center",fontSize:13,color:C.text,whiteSpace:"nowrap"}}>
+                  {c.lastVisit||"-"}
+                </div>
+
+                {/* 화살표 */}
+                <div style={{color:C.text3,fontSize:14,textAlign:"right"}}>›</div>
+              </div>
+            );
+          })
+        }
+      </div>
+    </div>
+  );
+}
+
+// ── 단체 예약/워크인 모달 ────────────────────────────────
+function GroupModal({ open, onClose, onSaveReservation, onSaveWalkIn, store, tableNames, tableCount, selectedTables, setSelectedTables, defaultDate, defaultMode, defaultTables }) {
+  const n = tableCount||STORES[store].tables;
+  const [mode, setMode] = useState("walkin"); // "walkin" | "reservation"
+  const [pax, setPax] = useState(null);
+  const [name, setName] = useState("");
+  const [phone, setPhone] = useState("");
+  const [date, setDate] = useState(defaultDate||todayStr());
+  const [time, setTime] = useState("18:00");
+  const [memo, setMemo] = useState("");
+
+  useEffect(()=>{
+    if(open){ setPax(null); setName(""); setPhone(""); setMemo(""); setTime("18:00"); setDate(defaultDate||todayStr()); setMode(defaultMode||"walkin"); if(defaultTables&&defaultTables.length>0) setSelectedTables(defaultTables); }
+  },[open, defaultDate, defaultMode]);
+
+  const tableList = Array.from({length:n},(_,i)=>i+1);
+  const toggleTable = (t) => setSelectedTables(prev =>
+    prev.includes(t) ? prev.filter(x=>x!==t) : [...prev, t]
+  );
+
+  const selTables = selectedTables.slice().sort((a,b)=>a-b);
+  const tableLabel = selTables.map(t=>tableNames[t]||`T${t}`).join(" + ");
+
+  const handleSave = () => {
+    if(selTables.length === 0) return;
+    if(mode === "walkin") {
+      if(!pax||pax<1) return;
+      onSaveWalkIn({ pax, tables: selTables, date });
+    } else {
+      if(!name.trim()||!pax||!date) return;
+      onSaveReservation({ name, pax:parseInt(pax), tables: selTables, date, time, phone, memo });
+    }
+  };
+
+  return (
+    <Modal open={open} onClose={onClose} title="👥 단체 예약">
+      {/* 모드 선택 */}
+      <div style={{display:"flex",gap:8,marginBottom:18}}>
+        {[["walkin","🚶 워크인"],["reservation","📋 예약"]].map(([m,l])=>(
+          <button key={m} onClick={()=>setMode(m)} style={{flex:1,padding:"10px",borderRadius:8,border:`1px solid ${mode===m?C.teal:C.border}`,background:mode===m?"#f0fbf9":"transparent",color:mode===m?C.teal:C.text2,fontFamily:"inherit",fontSize:13,fontWeight:mode===m?700:400,cursor:"pointer",transition:"all 0.2s"}}>
+            {l}
+          </button>
+        ))}
+      </div>
+
+      {/* 테이블 선택 */}
+      <div style={s.formGroup}>
+        <label style={s.formLabel}>
+          테이블 선택 * {selTables.length>0 && <span style={{color:C.accent,fontWeight:600}}>{tableLabel}</span>}
+        </label>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:5,maxHeight:180,overflowY:"auto"}}>
+          {tableList.map(t=>{
+            const sel = selTables.includes(t);
+            return (
+              <button key={t} onClick={()=>toggleTable(t)} style={{padding:"8px 4px",borderRadius:7,border:`1px solid ${sel?"#4a7fa8":C.border}`,background:sel?"#f0f6fc":C.card,color:sel?"#7ab8e8":C.text2,fontFamily:"inherit",fontSize:12,fontWeight:sel?700:400,cursor:"pointer",transition:"all 0.15s"}}>
+                {tableNames[t]||`T${t}`}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* 인원 */}
+      <div style={s.formGroup}>
+        <label style={s.formLabel}>인원 *</label>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:6,marginBottom:6}}>
+          {[5,6,7,8,9,10,12,15,20,25].map(p=>(
+            <button key={p} onClick={()=>setPax(p)} style={{padding:"9px 0",borderRadius:7,border:`1px solid ${pax===p?C.teal:C.border}`,background:pax===p?C.teal:C.card,color:pax===p?"#fff":C.text2,fontFamily:"inherit",fontSize:13,fontWeight:pax===p?700:400,cursor:"pointer",transition:"all 0.15s"}}>
+              {p}명
+            </button>
+          ))}
+        </div>
+        <input style={{...s.formInput,fontSize:13}} type="number" min="1" max="200"
+          value={pax&&!([5,6,7,8,9,10,12,15,20,25].includes(pax))?pax:""}
+          onChange={e=>setPax(parseInt(e.target.value)||null)} placeholder="직접 입력"/>
+      </div>
+
+      {/* 예약 추가 필드 */}
+      {mode==="reservation" && (
+        <>
+          <div style={s.formRow}>
+            <div style={s.formGroup}>
+              <label style={s.formLabel}>고객명 *</label>
+              <input style={s.formInput} value={name} onChange={e=>setName(e.target.value)} placeholder="홍길동"/>
+            </div>
+            <div style={s.formGroup}>
+              <label style={s.formLabel}>전화번호</label>
+              <input style={s.formInput} value={phone} onChange={e=>setPhone(e.target.value)} placeholder="010-0000-0000"/>
+            </div>
+          </div>
+          <div style={s.formRow}>
+            <div style={s.formGroup}>
+              <label style={s.formLabel}>날짜 *</label>
+              <input style={s.formInput} type="date" value={date} onChange={e=>setDate(e.target.value)}/>
+            </div>
+            <div style={s.formGroup}>
+              <label style={s.formLabel}>시간 *</label>
+              <select style={{...s.formInput}} value={time} onChange={e=>setTime(e.target.value)}>
+                {TIMES.map(t=><option key={t}>{t}</option>)}
+              </select>
+            </div>
+          </div>
+          <div style={s.formGroup}>
+            <label style={s.formLabel}>메모</label>
+            <textarea style={{...s.formInput,height:60,resize:"vertical"}} value={memo} onChange={e=>setMemo(e.target.value)} placeholder="요청사항 등..."/>
+          </div>
+        </>
+      )}
+
+      {mode==="walkin" && (
+        <div style={s.formGroup}>
+          <label style={s.formLabel}>날짜</label>
+          <input style={s.formInput} type="date" value={date} onChange={e=>setDate(e.target.value)}/>
+        </div>
+      )}
+
+      {/* 선택 요약 */}
+      {selTables.length>0 && pax && (
+        <div style={{background:C.bg3,border:`1px solid ${C.border}`,borderRadius:8,padding:"8px 12px",marginBottom:4,fontSize:12,color:C.text2}}>
+          📌 {tableLabel} · {pax}명{mode==="reservation"&&name?` · ${name}`:""}
+        </div>
+      )}
+
+      <div style={s.modalActions}>
+        <button style={{...s.btnSecondary,flex:1}} onClick={onClose}>취소</button>
+        <button
+          style={{flex:1,background:mode==="walkin"?C.teal:C.accent,color:"#fff",border:"none",padding:"10px",borderRadius:8,cursor:"pointer",fontFamily:"inherit",fontSize:13,fontWeight:600,opacity:(selTables.length===0||!pax)?0.5:1}}
+          onClick={handleSave}
+        >
+          {mode==="walkin"?"워크인 등록":"예약 추가"}
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+// ── ReservationModal ──────────────────────────────────────
+function ReservationModal({ open, onClose, onSave, store, editing, defaultDate, defaultTable, tableNames, tableCount }) {
+  const n = tableCount||STORES[store].tables;
+  const opts = Array.from({length:n},(_,i)=>({value:i+1,label:tableNames[i+1]||`T${i+1}`}));
+  const [form, setForm] = useState({name:"",pax:"",date:todayStr(),time:"18:00",table:1,phone:"",memo:""});
+  useEffect(()=>{
+    if(open){
+      if(editing) setForm({name:editing.name,pax:editing.pax,date:editing.date,time:editing.time,table:editing.table,phone:editing.phone||"",memo:editing.memo||""});
+      else setForm({name:"",pax:"",date:defaultDate||todayStr(),time:"18:00",table:defaultTable||1,phone:"",memo:""});
+    }
+  },[open,editing,defaultDate,defaultTable]);
+  const set=(k,v)=>setForm(f=>({...f,[k]:v}));
+  return (
+    <Modal open={open} onClose={onClose} title={editing?"예약 수정":"예약 추가"}>
+      <div style={s.formRow}>
+        <FI label="고객명 *" value={form.name} onChange={e=>set("name",e.target.value)} placeholder="홍길동"/>
+        <FI label="인원 *" type="number" min="1" max="30" value={form.pax} onChange={e=>set("pax",e.target.value)} placeholder="2"/>
+      </div>
+      <div style={s.formRow}>
+        <FI label="날짜 *" type="date" value={form.date} onChange={e=>set("date",e.target.value)}/>
+        <FS label="시간 *" value={form.time} onChange={e=>set("time",e.target.value)} options={TIMES}/>
+      </div>
+      <FS label="테이블" value={form.table} onChange={e=>set("table",e.target.value)} options={opts}/>
+      <FI label="전화번호" value={form.phone} onChange={e=>set("phone",e.target.value)} placeholder="010-0000-0000"/>
+      <FT label="메모" value={form.memo} onChange={e=>set("memo",e.target.value)} placeholder="알레르기, 생일, 요청사항 등..."/>
+      <div style={s.modalActions}>
+        <button style={{...s.btnSecondary,flex:1}} onClick={onClose}>취소</button>
+        <button style={{...s.btnPrimary,flex:1}} onClick={()=>{if(!form.name.trim()||!form.pax||!form.date)return;onSave({...form,pax:parseInt(form.pax),table:parseInt(form.table),id:editing?.id});}}>저장</button>
+      </div>
+    </Modal>
+  );
+}
+
+// ── CustomerModal ─────────────────────────────────────────
+function CustomerModal({ open, onClose, onSave, editing }) {
+  const [form, setForm] = useState({name:"",phone:"",memo:""});
+  useEffect(()=>{ if(open) setForm(editing?{name:editing.name,phone:editing.phone||"",memo:editing.memo||""}:{name:"",phone:"",memo:""}); },[open,editing]);
+  const set=(k,v)=>setForm(f=>({...f,[k]:v}));
+  return (
+    <Modal open={open} onClose={onClose} title={editing?"고객 수정":"고객 추가"}>
+      <div style={s.formRow}>
+        <FI label="이름 *" value={form.name} onChange={e=>set("name",e.target.value)} placeholder="홍길동"/>
+        <FI label="전화번호" value={form.phone} onChange={e=>set("phone",e.target.value)} placeholder="010-0000-0000"/>
+      </div>
+      <FT label="메모 (단골 특이사항)" value={form.memo} onChange={e=>set("memo",e.target.value)} placeholder="좋아하는 부위, 알레르기, VIP 여부 등..."/>
+      <div style={s.modalActions}>
+        <button style={{...s.btnSecondary,flex:1}} onClick={onClose}>취소</button>
+        <button style={{...s.btnPrimary,flex:1}} onClick={()=>{if(!form.name.trim())return;onSave({...form,id:editing?.id,visits:editing?.visits,lastVisit:editing?.lastVisit});}}>저장</button>
+      </div>
+    </Modal>
+  );
+}
+
+// ── TableModal ────────────────────────────────────────────
+function TableModal({ open, onClose, tableNum, store, reservations, tableNames, onAddRes, onWalkIn, onSetStatus, selectedDate, onMove }) {
+  if (!open) return null;
+  const tName = tableNames[tableNum]||`T${tableNum}`;
+  const filterDate = selectedDate || todayStr();
+  const todayActive = reservations.filter(r=>r.store===store && r.date===filterDate && tableIncludes(r,tableNum) && r.status!=="done").sort((a,b)=>a.time.localeCompare(b.time));
+  const hasDining = todayActive.some(r=>r.status==="dining");
+  const isEmpty = todayActive.length===0;
+
+  return (
+    <Modal open={open} onClose={onClose} title={tName}>
+      {isEmpty ? (
+        /* 빈 테이블 */
+        <>
+          <div style={{textAlign:"center",padding:"8px 0 20px"}}>
+            <div style={{fontSize:36,marginBottom:6}}>🪑</div>
+            <div style={{color:C.text,fontSize:15,fontWeight:600}}>{tName}</div>
+            <div style={{color:C.text3,fontSize:12,marginTop:4}}>비어 있는 테이블입니다</div>
+          </div>
+          <div style={{display:"flex",flexDirection:"column",gap:10}}>
+            <button onClick={onWalkIn} style={{background:C.teal,color:"#fff",border:"none",borderRadius:12,padding:"18px 16px",cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,boxShadow:`0 2px 12px ${C.teal}44`}}>
+              <div style={{display:"flex",alignItems:"center",gap:12}}>
+                <span style={{fontSize:28}}>🚶</span>
+                <div style={{textAlign:"left"}}>
+                  <div style={{fontSize:16,fontWeight:700}}>워크인 등록</div>
+                  <div style={{fontSize:11,opacity:0.85,marginTop:3}}>예약 없이 바로 방문한 손님</div>
+                </div>
+              </div>
+              <span style={{fontSize:20,opacity:0.7}}>›</span>
+            </button>
+            <button onClick={onAddRes} style={{background:C.bg3,color:C.text,border:`1px solid ${C.accent}`,borderRadius:12,padding:"16px",cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"space-between",gap:12}}>
+              <div style={{display:"flex",alignItems:"center",gap:12}}>
+                <span style={{fontSize:26}}>📋</span>
+                <div style={{textAlign:"left"}}>
+                  <div style={{fontSize:15,fontWeight:600,color:C.accent}}>예약 추가</div>
+                  <div style={{fontSize:11,color:C.text2,marginTop:3}}>날짜·시간·이름 등 상세 입력</div>
+                </div>
+              </div>
+              <span style={{fontSize:20,color:C.text3}}>›</span>
+            </button>
+          </div>
+          <div style={{marginTop:16}}><button style={{...s.btnSecondary,width:"100%"}} onClick={onClose}>닫기</button></div>
+        </>
+      ) : (
+        /* 예약/워크인 있는 테이블 */
+        <>
+          {todayActive.map(r=>(
+            <div key={r.id} style={{background:r.status==="dining"?(r.walkIn?"#f0fbf9":"#fff5f5"):C.bg3,border:`1px solid ${r.status==="dining"?(r.walkIn?"#8fd4c8":"#f5a9a9"):C.border}`,borderRadius:10,padding:14,marginBottom:10}}>
+              {/* 헤더 */}
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                <span style={{color:C.accent,fontWeight:700,fontSize:16}}>{r.time}</span>
+                <div style={{display:"flex",alignItems:"center",gap:6}}>
+                  <span style={{fontSize:12,color:C.text2}}>{r.pax}명</span>
+                  <StatusBadge status={r.status}/>
+                </div>
+              </div>
+              {/* 고객 정보 */}
+              {r.walkIn
+                ? <div style={{fontSize:15,fontWeight:700,color:C.teal,marginBottom:6}}>🚶 워크인 {r.pax}명</div>
+                : <>
+                    <div style={{fontSize:15,fontWeight:600,marginBottom:3}}>
+                      {r.name}
+                      {Array.isArray(r.tables)&&r.tables.length>1&&<span style={{fontSize:10,color:C.accent,marginLeft:6,fontWeight:700}}>👥 {r.tables.map(t=>tableNames[t]||`T${t}`).join("+")}</span>}
+                    </div>
+                    {r.phone&&<div style={{fontSize:12,color:C.text2,marginBottom:2}}>{r.phone}</div>}
+                    {r.memo&&<div style={{fontSize:11,color:C.text2,background:C.bg2,padding:"5px 8px",borderRadius:5,borderLeft:`2px solid ${C.accent}`,marginTop:4}}>{r.memo}</div>}
+                  </>
+              }
+              {/* 상태 변경 버튼 */}
+              <div style={{display:"flex",gap:8,marginTop:12}}>
+                {r.status==="upcoming" && (
+                  <button onClick={()=>onSetStatus(r.id,"dining")} style={{flex:1,background:C.teal,color:"#fff",border:"none",borderRadius:8,padding:"11px",cursor:"pointer",fontFamily:"inherit",fontSize:14,fontWeight:700}}>
+                    🪑 착석 처리
+                  </button>
+                )}
+                {r.status==="dining" && (
+                  <button onClick={()=>onSetStatus(r.id,"done")} style={{flex:2,background:"#7a5fa8",color:"#fff",border:"none",borderRadius:8,padding:"11px",cursor:"pointer",fontFamily:"inherit",fontSize:14,fontWeight:700}}>
+                    ✅ 식사완료
+                  </button>
+                )}
+                <button onClick={()=>{ onMove(r); onClose(); }} style={{background:"transparent",color:"#7ab8e8",border:"1px solid #4a7fa8",borderRadius:8,padding:"11px 10px",cursor:"pointer",fontFamily:"inherit",fontSize:13,fontWeight:600,whiteSpace:"nowrap"}}>
+                  예약 변경
+                </button>
+              </div>
+            </div>
+          ))}
+
+          {/* 식사 중인 손님이 있을 때: 식사완료 후 새 손님 받기 안내 */}
+          {hasDining && (
+            <div style={{background:C.bg3,border:`1px solid ${C.border}`,borderRadius:10,padding:14,marginBottom:10}}>
+              <div style={{fontSize:12,color:C.text3,marginBottom:10,textAlign:"center"}}>🔄 테이블 회전 — 식사완료 후 새 손님</div>
+              <div style={{display:"flex",gap:8}}>
+                <button onClick={onWalkIn} style={{flex:1,background:C.teal,color:"#fff",border:"none",borderRadius:8,padding:"10px",cursor:"pointer",fontFamily:"inherit",fontSize:13,fontWeight:600}}>
+                  🚶 워크인
+                </button>
+                <button onClick={onAddRes} style={{flex:1,background:"transparent",color:C.accent,border:`1px solid ${C.accent}`,borderRadius:8,padding:"10px",cursor:"pointer",fontFamily:"inherit",fontSize:13,fontWeight:600}}>
+                  📋 예약 추가
+                </button>
+              </div>
+            </div>
+          )}
+
+          <button style={{...s.btnSecondary,width:"100%"}} onClick={onClose}>닫기</button>
+        </>
+      )}
+    </Modal>
+  );
+}
+
+// ── App ───────────────────────────────────────────────────
+function App() {
+  const [store, setStore] = useState(0);
+  const [page, setPage] = useState("seats");
+  const [data, setData] = useState(initialData);
+  const [toast, setToast] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [syncErr, setSyncErr] = useState(false);
+  const [resModal, setResModal] = useState({open:false,editing:null,defaultDate:null,defaultTable:null});
+  const [custModal, setCustModal] = useState({open:false,editing:null});
+  const [tableModal, setTableModal] = useState({open:false,tableNum:null,selectedDate:null});
+  const [walkInModal, setWalkInModal] = useState({open:false,defaultDate:null,defaultTable:null});
+  const [tableNamesModal, setTableNamesModal] = useState(false);
+  const [confirmCancel, setConfirmCancel] = useState(null); // {id, isDone}
+  const [groupModal, setGroupModal] = useState({open:false, defaultDate:null, defaultMode:'walkin', defaultTables:[]});
+  const [selectedGroupTables, setSelectedGroupTables] = useState([]);
+
+  const showToast=(msg)=>{ setToast(msg); setTimeout(()=>setToast(""),2500); };
+
+  // ── DB 로드 ───────────────────────────────────────────
+  const loadFromDB = async () => {
+    try {
+      const [reservations, customers, settings] = await Promise.all([
+        db.getReservations(),
+        db.getCustomers(),
+        db.getSettings(),
+      ]);
+
+      // snake_case → camelCase 변환
+      // 단일 매장 - 로컬 index 0으로 고정
+      const toRes = (r) => ({
+        id: r.id, store: 0, name: r.name, pax: r.pax,
+        date: r.date, time: r.time, table: r.table,
+        phone: r.phone||"", memo: r.memo||"",
+        walkIn: r.walk_in, status: r.status,
+        groupId: r.group_id||null,
+      });
+      const toCust = (c) => ({
+        id: c.id, store: 0, name: c.name, phone: c.phone||"",
+        visits: c.visits||0, lastVisit: c.last_visit||"-", memo: c.memo||"",
+      });
+
+      const tableNames  = { 0: defaultTableNames(0) };
+      const tableCounts = { 0: 14 };
+      if (settings.length > 0) {
+        const s = settings[0];
+        tableNames[0]  = s.table_names || defaultTableNames(0);
+        tableCounts[0] = s.table_count || 14;
+      }
+
+      const maxResId  = reservations.length  ? Math.max(...reservations.map(r=>r.id))  + 1 : 1;
+      const maxCustId = customers.length     ? Math.max(...customers.map(c=>c.id))     + 1 : 1;
+
+      setData({
+        reservations: reservations.map(toRes),
+        customers:    customers.map(toCust),
+        tableNames, tableCounts,
+        nextResId:  maxResId,
+        nextCustId: maxCustId,
+      });
+      setSyncErr(false);
+    } catch(e) {
+      console.error("DB load error:", e);
+      setSyncErr(true);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // 최초 로드 + 10초마다 폴링
+  useEffect(() => {
+    loadFromDB();
+    const interval = setInterval(loadFromDB, 10000);
+    return () => clearInterval(interval);
+  }, []);
+  const tableNames  = data.tableNames[store]||defaultTableNames(store);
+  const tableCount   = data.tableCounts?.[store] ?? STORES[store].tables;
+
+  const setResStatus=(id,status)=>{
+    setData(d=>({...d,reservations:d.reservations.map(r=>r.id===id?{...r,status}:r)}));
+    if(status==="dining") showToast("착석 처리됐어요 🪑");
+    if(status==="done")   showToast("식사완료! 테이블이 비워졌어요 ✅");
+    setTableModal(m=>({...m,open:false}));
+    db.updateReservation(id, {status})
+      .then(()=>loadFromDB())
+      .catch(e=>console.error("setResStatus DB error:", e));
+  };
+
+  const saveReservation=(form)=>{
+    const newId = form.id || data.nextResId;
+    const newRes = {...form, id:newId, store, walkIn:false, status:form.status||"upcoming"};
+    setData(d=>{
+      let reservations=form.id?d.reservations.map(r=>r.id===form.id?{...r,...form}:r):[...d.reservations,newRes];
+      let customers=[...d.customers]; let nextCustId=d.nextCustId;
+      if(!form.id){
+        const ex=customers.find(c=>c.name===form.name&&c.store===store);
+        if(ex) customers=customers.map(c=>c.id===ex.id?{...c,visits:c.visits+1,lastVisit:todayStr()}:c);
+        else customers.push({id:nextCustId++,name:form.name,phone:form.phone,visits:1,lastVisit:todayStr(),memo:"",store});
+      }
+      return {...d,reservations,customers,nextResId:form.id?d.nextResId:d.nextResId+1,nextCustId};
+    });
+    showToast(form.id?"예약이 수정됐어요":"예약이 추가됐어요");
+    setResModal({open:false,editing:null,defaultDate:null,defaultTable:null});
+    // DB 동기화
+    db.upsertReservation({...form, id:newId, walkIn:false, status:form.status||"upcoming"})
+      .then(()=>loadFromDB())
+      .catch(e=>console.error("saveReservation DB error:", e));
+  };
+
+  const saveWalkIn=({pax,table})=>{
+    const newId = data.nextResId;
+    const date  = walkInModal.defaultDate||todayStr();
+    const time  = nowTimeStr();
+    setData(d=>({...d,reservations:[...d.reservations,{id:newId,store,name:"워크인",pax,date,time,table,phone:"",memo:"",walkIn:true,status:"dining"}],nextResId:d.nextResId+1}));
+    showToast(`워크인 ${pax}명 등록됐어요 🚶`);
+    setWalkInModal({open:false,defaultDate:null,defaultTable:null});
+    db.upsertReservation({id:newId,name:"워크인",pax,date,time,table,walkIn:true,status:"dining"})
+      .then(()=>loadFromDB())
+      .catch(e=>console.error("saveWalkIn DB error:", e));
+  };
+
+  const cancelReservation=(id)=>{
+    const r=data.reservations.find(x=>x.id===id);
+    setConfirmCancel({id, isDone: r?.status==="done"});
+  };
+  const doCancel=(id, isDone)=>{
+    setData(d=>({...d,reservations:d.reservations.filter(r=>r.id!==id)}));
+    showToast(isDone?"기록이 삭제됐어요":"예약이 취소됐어요");
+    setConfirmCancel(null);
+  };
+
+  const swapTables=(fromTable, toTable, date)=>{
+    setData(d=>{
+      const updated = d.reservations.map(r=>{
+        if(r.store!==store || r.date!==date || r.status==="done") return r;
+        if(r.table===fromTable) return {...r, table:toTable};
+        if(r.table===toTable)   return {...r, table:fromTable};
+        return r;
+      });
+      // DB 동기화 (변경된 것만)
+      updated.forEach(r=>{
+        const orig = d.reservations.find(x=>x.id===r.id);
+        if(orig && orig.table!==r.table)
+          db.updateReservation(r.id, {"table":r.table}).catch(e=>console.error(e));
+      });
+      return {...d, reservations:updated};
+    });
+    showToast(`T${fromTable} ↔ T${toTable} 교체됐어요 🔀`);
+  };
+
+  const saveGroupReservation=(form)=>{
+    // 테이블마다 각각 동일한 예약 정보 저장
+    const groupId = Date.now(); // 단체 묶음 식별자
+    setData(d=>{
+      let customers=[...d.customers]; let nextCustId=d.nextCustId;
+      const ex=customers.find(c=>c.name===form.name&&c.store===store);
+      if(ex) customers=customers.map(c=>c.id===ex.id?{...c,visits:c.visits+1,lastVisit:todayStr()}:c);
+      else customers.push({id:nextCustId++,name:form.name,phone:form.phone||"",visits:1,lastVisit:todayStr(),memo:"",store});
+      let nextId = d.nextResId;
+      const newReservations = form.tables.map(t=>({
+        id: nextId++, store, name:form.name, pax:form.pax, date:form.date,
+        time:form.time, table:t, phone:form.phone||"", memo:form.memo||"",
+        walkIn:false, status:"upcoming", groupId,
+      }));
+      return {...d, reservations:[...d.reservations, ...newReservations], customers, nextResId:nextId, nextCustId};
+    });
+    const label = form.tables.map(t=>tableNames[t]||`T${t}`).join("+");
+    showToast(`단체 예약 추가됐어요 (${label})`);
+    setGroupModal({open:false,defaultDate:null,defaultMode:'walkin',defaultTables:[]});
+    setSelectedGroupTables([]);
+    // DB 동기화
+    const dbRows = form.tables.map((t,i)=>({
+      id:data.nextResId+i, name:form.name, pax:form.pax, date:form.date,
+      time:form.time, table:t, phone:form.phone||"", memo:form.memo||"",
+      walkIn:false, status:"upcoming", groupId,
+    }));
+    db.upsertReservations(dbRows)
+      .then(()=>loadFromDB())
+      .catch(e=>console.error("saveGroupRes DB error:", e));
+  };
+
+  const saveGroupWalkIn=({pax, tables, date})=>{
+    const groupId = Date.now();
+    const time = nowTimeStr();
+    setData(d=>{
+      let nextId = d.nextResId;
+      const newReservations = tables.map(t=>({
+        id: nextId++, store, name:"워크인(단체)", pax, date, time,
+        table:t, phone:"", memo:"", walkIn:true, status:"dining", groupId,
+      }));
+      return {...d, reservations:[...d.reservations, ...newReservations], nextResId:nextId};
+    });
+    const label = tables.map(t=>tableNames[t]||`T${t}`).join("+");
+    showToast(`단체 워크인 등록됐어요 (${label})`);
+    setGroupModal({open:false,defaultDate:null});
+    setSelectedGroupTables([]);
+  };
+
+  const saveCustomer=(form)=>{
+    const custId = form.id || data.nextCustId;
+    setData(d=>{
+      if(form.id) return {...d,customers:d.customers.map(c=>c.id===form.id?{...c,...form}:c)};
+      return {...d,customers:[...d.customers,{...form,id:custId,store,visits:0,lastVisit:"-"}],nextCustId:d.nextCustId+1};
+    });
+    showToast(form.id?"고객 정보가 수정됐어요":"고객이 추가됐어요");
+    setCustModal({open:false,editing:null});
+    db.upsertCustomer({...form, id:custId})
+      .catch(e=>console.error("saveCustomer DB error:", e));
+  };
+
+  const saveTableSettings=(names, count)=>{
+    setData(d=>({
+      ...d,
+      tableNames:  {...d.tableNames,  [store]: names},
+      tableCounts: {...(d.tableCounts||{}), [store]: count},
+    }));
+    showToast("테이블 설정이 저장됐어요");
+    setTableNamesModal(false);
+    db.upsertSettings({store:STORE_ID, table_names:names, table_count:count}).catch(e=>console.error(e));
+  };
+
+  const navItems=[{key:"seats",label:"🪑 좌석 현황"},{key:"reservations",label:"📋 예약 관리"},{key:"customers",label:"👥 고객 관리"}];
+
+  return (
+    <div style={s.app}>
+      {/* 로딩 화면 */}
+      {loading && (
+        <div style={{position:"fixed",inset:0,background:"#fff",zIndex:999,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:16}}>
+          <div style={{fontSize:36}}>🍖</div>
+          <div style={{fontFamily:"serif",fontSize:18,color:C.accent}}>예약관리 시스템</div>
+          <div style={{fontSize:13,color:C.text3}}>데이터 불러오는 중...</div>
+        </div>
+      )}
+
+      <div style={s.topbar}>
+        <div style={s.logo}>산첩첩물첩첩</div>
+        <div style={{fontFamily:"serif",fontSize:14,color:C.accent,fontWeight:600}}>🍖 산첩첩물첩첩</div>
+        <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:8}}>
+          {syncErr
+            ? <span style={{fontSize:11,color:C.red,cursor:"pointer"}} onClick={loadFromDB}>⚠️ 재연결</span>
+            : <span style={{fontSize:11,color:C.teal}}>● 실시간</span>
+          }
+          <span style={{color:C.text2,fontSize:12,whiteSpace:"nowrap"}}>{formatDate(new Date())}</span>
+        </div>
+      </div>
+      <div style={s.nav}>
+        {navItems.map(n=><button key={n.key} style={s.navTab(page===n.key)} onClick={()=>setPage(n.key)}>{n.label}</button>)}
+      </div>
+      <div style={s.main}>
+        {page==="seats"&&<SeatsPage store={store} reservations={data.reservations} tableNames={tableNames} onTableClick={(n,ds)=>setTableModal({open:true,tableNum:n,selectedDate:ds})} onOpenTableNames={()=>setTableNamesModal(true)} tableCount={tableCount} onSwapTables={swapTables} onOpenGroup={(ds,tables,mode)=>{ setSelectedGroupTables(tables||[]); setGroupModal({open:true,defaultDate:ds,defaultMode:mode||'walkin',defaultTables:tables||[]}); }}/>}
+        {page==="reservations"&&<ReservationsPage store={store} reservations={data.reservations} tableNames={tableNames} onAdd={date=>setResModal({open:true,editing:null,defaultDate:date,defaultTable:null})} onWalkIn={date=>setWalkInModal({open:true,defaultDate:date,defaultTable:null})} onEdit={r=>setResModal({open:true,editing:r,defaultDate:null,defaultTable:null})} onCancel={cancelReservation} confirmCancel={confirmCancel} onConfirmCancel={doCancel} onDismissCancel={()=>setConfirmCancel(null)} onMove={r=>setResModal({open:true,editing:r,defaultDate:null,defaultTable:null})} onSetStatus={setResStatus} onOpenGroup={(ds,tables,mode)=>{ setSelectedGroupTables(tables||[]); setGroupModal({open:true,defaultDate:ds,defaultMode:mode||'walkin',defaultTables:tables||[]}); }}/>}
+        {page==="customers"&&<CustomersPage store={store} customers={data.customers} onAdd={()=>setCustModal({open:true,editing:null})} onEdit={c=>setCustModal({open:true,editing:c})}/>}
+      </div>
+      <ReservationModal open={resModal.open} onClose={()=>setResModal({open:false,editing:null,defaultDate:null,defaultTable:null})} onSave={saveReservation} store={store} editing={resModal.editing} defaultDate={resModal.defaultDate} defaultTable={resModal.defaultTable} tableNames={tableNames} tableCount={tableCount}/>
+      <WalkInModal open={walkInModal.open} onClose={()=>setWalkInModal({open:false,defaultDate:null,defaultTable:null})} onSave={saveWalkIn} store={store} tableNames={tableNames} tableCount={tableCount} defaultTable={walkInModal.defaultTable}/>
+      <CustomerModal open={custModal.open} onClose={()=>setCustModal({open:false,editing:null})} onSave={saveCustomer} editing={custModal.editing}/>
+      <TableModal open={tableModal.open} onClose={()=>setTableModal({open:false,tableNum:null,selectedDate:null})} tableNum={tableModal.tableNum} store={store} reservations={data.reservations} tableNames={tableNames} selectedDate={tableModal.selectedDate} onSetStatus={setResStatus} onMove={r=>setResModal({open:true,editing:r,defaultDate:null,defaultTable:null})} onAddRes={()=>{ const sd=tableModal.selectedDate; setTableModal({open:false,tableNum:null,selectedDate:null}); setResModal({open:true,editing:null,defaultDate:sd||todayStr(),defaultTable:tableModal.tableNum}); }} onWalkIn={()=>{ const sd=tableModal.selectedDate; setTableModal({open:false,tableNum:null,selectedDate:null}); setWalkInModal({open:true,defaultDate:sd||todayStr(),defaultTable:tableModal.tableNum}); }}/>
+      <GroupModal
+        open={groupModal.open}
+        onClose={()=>{ setGroupModal({open:false,defaultDate:null,defaultMode:'walkin',defaultTables:[]}); setSelectedGroupTables([]); }}
+        onSaveReservation={saveGroupReservation}
+        onSaveWalkIn={saveGroupWalkIn}
+        store={store}
+        tableNames={tableNames}
+        tableCount={tableCount}
+        selectedTables={selectedGroupTables}
+        setSelectedTables={setSelectedGroupTables}
+        defaultDate={groupModal.defaultDate}
+        defaultMode={groupModal.defaultMode}
+        defaultTables={groupModal.defaultTables}
+      />
+      <TableNamesModal open={tableNamesModal} onClose={()=>setTableNamesModal(false)} onSave={saveTableSettings} store={store} tableNames={tableNames} tableCount={tableCount}/>
+      <Toast msg={toast}/>
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App />);
+</script>
+</body>
+</html>
