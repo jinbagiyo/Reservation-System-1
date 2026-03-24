@@ -115,6 +115,14 @@ const TIMES = ["17:00","17:30","18:00","18:30","19:00","19:30","20:00","20:30","
 // status: "upcoming" | "dining" | "done"
 
 function todayStr() { return new Date().toISOString().split("T")[0]; }
+
+function formatPhone(v) {
+  const d = v.replace(/\D/g,"").slice(0,11);
+  if(d.length<=3)  return d;
+  if(d.length<=7)  return d.slice(0,3)+"-"+d.slice(3);
+  if(d.length<=11) return d.slice(0,3)+"-"+d.slice(3,7)+"-"+d.slice(7);
+  return d;
+}
 function formatDate(d) {
   const days=["일","월","화","수","목","금","토"];
   return `${d.getMonth()+1}월 ${d.getDate()}일 (${days[d.getDay()]})`;
@@ -576,6 +584,12 @@ function SeatsPage({ store, reservations, tableNames, tableCount, onTableClick, 
           </button>
         </div>
       </div>
+      {/* 단체 선택 힌트 — 평상시에만 표시 */}
+      {!multiMode && !swapMode && (
+        <div style={{textAlign:"center",padding:"5px 0 2px",fontSize:11,color:C.text3}}>
+          테이블을 길게 누르면 단체 선택 모드로 진입해요
+        </div>
+      )}
 
       {/* 이동 모드 배너 */}
       {swapMode && (
@@ -624,7 +638,7 @@ function SeatsPage({ store, reservations, tableNames, tableCount, onTableClick, 
               <div key={l} style={s.legendItem}><div style={s.legendDot(c)}/>{l}</div>
             ))}
           </div>
-          {!multiMode && <div style={{fontSize:11,color:C.text3}}>길게 누르면 단체 선택</div>}
+
         </div>
         {(()=>{
           const active = activeRes.filter(r=>r.status!=="done");
@@ -963,7 +977,7 @@ function GroupModal({ open, onClose, onSaveReservation, onSaveWalkIn, store, tab
             </div>
             <div style={s.formGroup}>
               <label style={s.formLabel}>전화번호</label>
-              <input style={s.formInput} value={phone} onChange={e=>setPhone(e.target.value)} placeholder="010-0000-0000"/>
+              <input style={s.formInput} value={phone} onChange={e=>setPhone(formatPhone(e.target.value))} placeholder="010-0000-0000" inputMode="numeric"/>
             </div>
           </div>
           <div style={s.formRow}>
@@ -1035,7 +1049,7 @@ function ReservationModal({ open, onClose, onSave, store, editing, defaultDate, 
         <FS label="시간 *" value={form.time} onChange={e=>set("time",e.target.value)} options={TIMES}/>
       </div>
       <FS label="테이블" value={form.table} onChange={e=>set("table",e.target.value)} options={opts}/>
-      <FI label="전화번호" value={form.phone} onChange={e=>set("phone",e.target.value)} placeholder="010-0000-0000"/>
+      <FI label="전화번호" value={form.phone} onChange={e=>set("phone",formatPhone(e.target.value))} placeholder="010-0000-0000" inputMode="numeric"/>
       <FT label="메모" value={form.memo} onChange={e=>set("memo",e.target.value)} placeholder="알레르기, 생일, 요청사항 등..."/>
       <div style={s.modalActions}>
         <button style={{...s.btnSecondary,flex:1}} onClick={onClose}>취소</button>
@@ -1054,7 +1068,7 @@ function CustomerModal({ open, onClose, onSave, editing }) {
     <Modal open={open} onClose={onClose} title={editing?"고객 수정":"고객 추가"}>
       <div style={s.formRow}>
         <FI label="이름 *" value={form.name} onChange={e=>set("name",e.target.value)} placeholder="홍길동"/>
-        <FI label="전화번호" value={form.phone} onChange={e=>set("phone",e.target.value)} placeholder="010-0000-0000"/>
+        <FI label="전화번호" value={form.phone} onChange={e=>set("phone",formatPhone(e.target.value))} placeholder="010-0000-0000" inputMode="numeric"/>
       </div>
       <FT label="메모 (단골 특이사항)" value={form.memo} onChange={e=>set("memo",e.target.value)} placeholder="좋아하는 부위, 알레르기, VIP 여부 등..."/>
       <div style={s.modalActions}>
@@ -1277,9 +1291,29 @@ function App() {
     });
     showToast(form.id?"예약이 수정됐어요":"예약이 추가됐어요");
     setResModal({open:false,editing:null,defaultDate:null,defaultTable:null});
-    // DB 동기화
+    // DB 동기화 — 예약 저장 후 고객도 같이 저장
     db.upsertReservation({...form, id:newId, walkIn:false, status:form.status||"upcoming"})
-      .then(()=>loadFromDB())
+      .then(async () => {
+        if (!form.id) {
+          // 신규 예약이면 고객도 DB에 upsert
+          const custId = data.nextCustId;
+          const ex = data.customers.find(c=>c.name===form.name && c.store===0);
+          if (ex) {
+            await db.upsertCustomer({
+              id: ex.id, store: STORE_ID, name: ex.name,
+              phone: ex.phone||"", visits: ex.visits+1,
+              last_visit: todayStr(), memo: ex.memo||"",
+            }).catch(e=>console.error("customer update error:", e));
+          } else {
+            await db.upsertCustomer({
+              id: custId, store: STORE_ID, name: form.name,
+              phone: form.phone||"", visits: 1,
+              last_visit: todayStr(), memo: "",
+            }).catch(e=>console.error("customer insert error:", e));
+          }
+        }
+        loadFromDB();
+      })
       .catch(e=>console.error("saveReservation DB error:", e));
   };
 
@@ -1303,6 +1337,9 @@ function App() {
     setData(d=>({...d,reservations:d.reservations.filter(r=>r.id!==id)}));
     showToast(isDone?"기록이 삭제됐어요":"예약이 취소됐어요");
     setConfirmCancel(null);
+    db.deleteReservation(id)
+      .then(()=>loadFromDB())
+      .catch(e=>console.error("deleteReservation DB error:", e));
   };
 
   const swapTables=(fromTable, toTable, date)=>{
@@ -1344,14 +1381,28 @@ function App() {
     showToast(`단체 예약 추가됐어요 (${label})`);
     setGroupModal({open:false,defaultDate:null,defaultMode:'walkin',defaultTables:[]});
     setSelectedGroupTables([]);
-    // DB 동기화
+    // DB 동기화 — 예약 + 고객 저장
     const dbRows = form.tables.map((t,i)=>({
       id:data.nextResId+i, name:form.name, pax:form.pax, date:form.date,
       time:form.time, table:t, phone:form.phone||"", memo:form.memo||"",
       walkIn:false, status:"upcoming", groupId,
     }));
     db.upsertReservations(dbRows)
-      .then(()=>loadFromDB())
+      .then(async () => {
+        const ex = data.customers.find(c=>c.name===form.name && c.store===0);
+        if (ex) {
+          await db.upsertCustomer({
+            id:ex.id, store:STORE_ID, name:ex.name, phone:ex.phone||"",
+            visits:ex.visits+1, last_visit:todayStr(), memo:ex.memo||"",
+          }).catch(e=>console.error("group customer update error:", e));
+        } else {
+          await db.upsertCustomer({
+            id:data.nextCustId, store:STORE_ID, name:form.name, phone:form.phone||"",
+            visits:1, last_visit:todayStr(), memo:"",
+          }).catch(e=>console.error("group customer insert error:", e));
+        }
+        loadFromDB();
+      })
       .catch(e=>console.error("saveGroupRes DB error:", e));
   };
 
@@ -1410,7 +1461,6 @@ function App() {
 
       <div style={s.topbar}>
         <div style={s.logo}>산첩첩물첩첩</div>
-        <div style={{fontFamily:"serif",fontSize:14,color:C.accent,fontWeight:600}}>🍖 산첩첩물첩첩</div>
         <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:8}}>
           {syncErr
             ? <span style={{fontSize:11,color:C.red,cursor:"pointer"}} onClick={loadFromDB}>⚠️ 재연결</span>
