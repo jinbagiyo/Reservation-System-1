@@ -143,6 +143,8 @@ const initialData = {
   customers: [],
   tableNames: { 0:defaultTableNames(0) },
   tableCounts: { 0:14 },
+  wingCounts: { 0:[7,7] },  // [본관 테이블수, 별관 테이블수]
+  wingNames:  { 0:['본관','별관'] },
   nextResId: 1,
   nextCustId: 1,
 };
@@ -315,16 +317,20 @@ function WalkInModal({ open, onClose, onSave, store, tableNames, tableCount, def
 }
 
 // ── TableNamesModal ───────────────────────────────────────
-function TableNamesModal({ open, onClose, onSave, store, tableNames, tableCount }) {
+function TableNamesModal({ open, onClose, onSave, store, tableNames, tableCount, wingCounts, wingNames }) {
   const [count, setCount] = useState(tableCount||STORES[store].tables);
   const [names, setNames] = useState({});
+  const [wCounts, setWCounts] = useState(wingCounts||[7,7]);
+  const [wNames,  setWNames]  = useState(wingNames||['본관','별관']);
 
   useEffect(()=>{
     if(open){
       setCount(tableCount||STORES[store].tables);
       setNames({...tableNames});
+      setWCounts(wingCounts||[7,7]);
+      setWNames(wingNames||['본관','별관']);
     }
-  },[open, tableNames, tableCount]);
+  },[open, tableNames, tableCount, wingCounts, wingNames]);
 
   const addTable = () => setCount(c => c + 1);
   const removeTable = () => {
@@ -355,6 +361,28 @@ function TableNamesModal({ open, onClose, onSave, store, tableNames, tableCount 
         </div>
       </div>
 
+      {/* 본관 / 별관 테이블 수 */}
+      <div style={{marginBottom:18}}>
+        <label style={s.formLabel}>본관 / 별관 테이블 수</label>
+        {[0,1].map(wi=>(
+          <div key={wi} style={{display:"flex",alignItems:"center",gap:10,marginTop:8}}>
+            <input
+              style={{...s.formInput,width:60,padding:"6px 8px",textAlign:"center"}}
+              value={wNames[wi]||""}
+              onChange={e=>setWNames(p=>{const n=[...p];n[wi]=e.target.value;return n;})}
+              placeholder={wi===0?"본관":"별관"}
+            />
+            <button onClick={()=>setWCounts(p=>{const n=[...p];n[wi]=Math.max(1,(n[wi]||1)-1);return n;})}
+              style={{width:32,height:32,borderRadius:8,border:`1px solid ${C.border}`,background:"#fff",color:C.red,fontSize:18,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>−</button>
+            <span style={{fontSize:16,fontWeight:700,color:C.accent,minWidth:24,textAlign:"center"}}>{wCounts[wi]||0}</span>
+            <button onClick={()=>setWCounts(p=>{const n=[...p];n[wi]=(n[wi]||0)+1;return n;})}
+              style={{width:32,height:32,borderRadius:8,border:`1px solid ${C.border}`,background:"#fff",color:C.green,fontSize:18,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>+</button>
+            <span style={{fontSize:11,color:C.text3}}>개</span>
+          </div>
+        ))}
+        <div style={{fontSize:11,color:C.text3,marginTop:6}}>총 {(wCounts[0]||0)+(wCounts[1]||0)}개 — 본관 T1~T{wCounts[0]||0}, 별관 T{(wCounts[0]||0)+1}~T{(wCounts[0]||0)+(wCounts[1]||0)}</div>
+      </div>
+
       {/* 테이블 이름 */}
       <div style={{marginBottom:14}}>
         <label style={s.formLabel}>테이블 이름 (선택)</label>
@@ -376,7 +404,7 @@ function TableNamesModal({ open, onClose, onSave, store, tableNames, tableCount 
 
       <div style={s.modalActions}>
         <button style={{...s.btnSecondary,flex:1}} onClick={onClose}>취소</button>
-        <button style={{...s.btnPrimary,flex:1}} onClick={()=>onSave(names, count)}>저장</button>
+        <button style={{...s.btnPrimary,flex:1}} onClick={()=>onSave(names, count, wCounts, wNames)}>저장</button>
       </div>
     </Modal>
   );
@@ -515,68 +543,96 @@ function DateNav({ viewDate, setViewDate, reservations, store }) {
   );
 }
 
+// 본관: T1~T10, 별관: T11~T14
+const WINGS = [
+  { key:"main",  label:"본관", from:1,  to:10 },
+  { key:"annex", label:"별관", from:11, to:14 },
+];
+
 function SeatsPage({ store, reservations, tableNames, tableCount, onTableClick, onOpenTableNames, onSwapTables, onOpenGroup }) {
   const [viewDate, setViewDate] = useState(new Date());
+  const [wing, setWing]         = useState("all");   // "all"|"main"|"annex"
   const [swapMode, setSwapMode] = useState(false);
   const [swapFrom, setSwapFrom] = useState(null);
-  const [multiMode, setMultiMode] = useState(false);   // 다중선택 모드
-  const [multiSel, setMultiSel] = useState([]);         // 선택된 테이블 목록
+  const [multiMode, setMultiMode] = useState(false);
+  const [multiSel,  setMultiSel]  = useState([]);
 
   const ds = dateStr(viewDate);
   const activeRes = reservations.filter(r=>r.store===store && r.date===ds && r.status!=="done");
 
-  // ── 길게 누르기 지원 ──
   const pressTimer = useRef(null);
-
   const handlePressStart = (n) => {
     pressTimer.current = setTimeout(()=>{
-      // 길게 누르기 → 다중선택 모드 진입 + 해당 테이블 첫 선택
-      setMultiMode(true);
-      setSwapMode(false); setSwapFrom(null);
-      setMultiSel([n]);
+      setMultiMode(true); setSwapMode(false); setSwapFrom(null); setMultiSel([n]);
     }, 500);
   };
-
-  const handlePressEnd = () => { clearTimeout(pressTimer.current); };
+  const handlePressEnd = () => clearTimeout(pressTimer.current);
 
   const handleTableClick = (n) => {
-    // 다중선택 모드
-    if (multiMode) {
-      setMultiSel(prev =>
-        prev.includes(n) ? prev.filter(x=>x!==n) : [...prev, n]
-      );
-      return;
-    }
-    // 이동(swap) 모드
+    if (multiMode) { setMultiSel(prev=>prev.includes(n)?prev.filter(x=>x!==n):[...prev,n]); return; }
     if (swapMode) {
-      if (swapFrom === null) { setSwapFrom(n); return; }
-      if (swapFrom === n)    { setSwapFrom(null); return; }
-      onSwapTables(swapFrom, n, ds);
-      setSwapFrom(null); setSwapMode(false);
-      return;
+      if (swapFrom===null) { setSwapFrom(n); return; }
+      if (swapFrom===n)    { setSwapFrom(null); return; }
+      onSwapTables(swapFrom, n, ds); setSwapFrom(null); setSwapMode(false); return;
     }
-    // 일반 클릭
     onTableClick(n, ds);
   };
 
   const cancelMulti = () => { setMultiMode(false); setMultiSel([]); };
   const cancelSwap  = () => { setSwapMode(false); setSwapFrom(null); };
+  const openGroupWithSel = (mode) => { onOpenGroup(ds, multiSel, mode); setMultiMode(false); setMultiSel([]); };
 
-  const openGroupWithSel = (mode) => {
-    onOpenGroup(ds, multiSel, mode);
-    setMultiMode(false); setMultiSel([]);
+  // 보여줄 구역 목록
+  const visibleWings = wing==="all" ? WINGS : WINGS.filter(w=>w.key===wing);
+
+  // 요약 통계
+  const active   = activeRes.filter(r=>r.status!=="done");
+  const seen     = new Set(); let teams=0;
+  active.forEach(r=>{ const k=r.groupId?`g${r.groupId}`:`r${r.id}`; if(!seen.has(k)){seen.add(k);teams++;} });
+  const totalPax = active.reduce((s,r)=>s+r.pax,0);
+  const dining   = active.filter(r=>r.status==="dining").length;
+  const upcoming = active.filter(r=>r.status==="upcoming").length;
+
+  const renderTableCard = (n) => {
+    const { cls, status, name, pax, isGroup } = getTableDisplay(activeRes, n);
+    const tName       = tableNames[n]||`T${n}`;
+    const isSwapFrom  = swapMode && swapFrom===n;
+    const isMultiSel  = multiMode && multiSel.includes(n);
+    const base        = s.tableCard(cls);
+    const cardStyle   = isMultiSel
+      ? {...base, border:`2px solid ${C.accent}`, background:"#fffbf0", transform:"scale(1.04)"}
+      : isSwapFrom
+        ? {...base, border:"2px solid #4a7fa8", background:"#f0f6fc", transform:"scale(1.04)"}
+        : swapMode && swapFrom!==null
+          ? {...base, border:"2px dashed #b0cce8", opacity:0.85}
+          : (swapMode||multiMode)
+            ? {...base, opacity: multiMode&&!isMultiSel ? 0.7 : 1}
+            : base;
+    return (
+      <div key={n} style={{...cardStyle, transition:"all 0.15s", userSelect:"none"}}
+        onClick={()=>handleTableClick(n)}
+        onMouseDown={()=>handlePressStart(n)} onMouseUp={handlePressEnd} onMouseLeave={handlePressEnd}
+        onTouchStart={()=>handlePressStart(n)} onTouchEnd={handlePressEnd}
+      >
+        <div style={s.tableNum}>{tName}</div>
+        {isMultiSel && <div style={{fontSize:9,color:C.accent,marginBottom:2,fontWeight:700}}>✓ 선택</div>}
+        {isSwapFrom && <div style={{fontSize:9,color:C.blue,marginBottom:2,fontWeight:700}}>선택됨</div>}
+        {isGroup && !isMultiSel && <div style={{fontSize:9,color:C.accent,marginBottom:1,fontWeight:700}}>👥</div>}
+        <div style={s.tableStatus(isSwapFrom?"reserved":cls)}>{status}</div>
+        {name&&<div style={s.tableName}>{name}</div>}
+        {pax&&<div style={s.tablePax}>{pax}</div>}
+      </div>
+    );
   };
 
   return (
     <div>
-      {/* 상단 바 */}
+      {/* 날짜 + 버튼 */}
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,gap:8,flexWrap:"wrap"}}>
         <DateNav viewDate={viewDate} setViewDate={setViewDate} reservations={reservations} store={store}/>
         <div style={{display:"flex",gap:6}}>
-          <button
-            onClick={()=>{ setSwapMode(m=>!m); setSwapFrom(null); setMultiMode(false); setMultiSel([]); }}
-            style={{background:swapMode?"#e8f0f8":"transparent",border:`1px solid ${swapMode?"#b0cce8":C.border}`,color:swapMode?C.blue:C.text2,padding:"5px 12px",borderRadius:8,cursor:"pointer",fontSize:12,fontFamily:"inherit",fontWeight:swapMode?600:400,transition:"all 0.2s"}}
-          >
+          <button onClick={()=>{ setSwapMode(m=>!m); setSwapFrom(null); setMultiMode(false); setMultiSel([]); }}
+            style={{background:swapMode?"#e8f0f8":"transparent",border:`1px solid ${swapMode?"#b0cce8":C.border}`,color:swapMode?C.blue:C.text2,padding:"5px 12px",borderRadius:8,cursor:"pointer",fontSize:12,fontFamily:"inherit",fontWeight:swapMode?600:400,transition:"all 0.2s"}}>
             🔀 이동{swapMode?" 중...":""}
           </button>
           <button onClick={onOpenTableNames} style={{background:"transparent",border:`1px solid ${C.border}`,color:C.text2,padding:"5px 12px",borderRadius:8,cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>
@@ -584,127 +640,103 @@ function SeatsPage({ store, reservations, tableNames, tableCount, onTableClick, 
           </button>
         </div>
       </div>
-      {/* 단체 선택 힌트 — 평상시에만 표시 */}
-      {!multiMode && !swapMode && (
-        <div style={{textAlign:"center",padding:"5px 0 2px",fontSize:11,color:C.text3}}>
-          테이블을 길게 누르면 단체 선택 모드로 진입해요
-        </div>
-      )}
 
       {/* 이동 모드 배너 */}
       {swapMode && (
         <div style={{background:"#f0f6fc",border:"1px solid #b0cce8",borderRadius:10,padding:"10px 16px",marginBottom:12,display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
-          <div style={{fontSize:13,color:"#7ab8e8"}}>
+          <div style={{fontSize:13,color:C.blue}}>
             {swapFrom===null ? "① 옮길 테이블을 선택하세요" : `② ${tableNames[swapFrom]||`T${swapFrom}`} 선택됨 → 바꿀 테이블을 선택하세요`}
           </div>
-          <button onClick={cancelSwap} style={{background:"transparent",border:"1px solid #4a7fa8",color:"#7ab8e8",padding:"4px 12px",borderRadius:6,cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>취소</button>
+          <button onClick={cancelSwap} style={{background:"transparent",border:"1px solid #b0cce8",color:C.blue,padding:"4px 12px",borderRadius:6,cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>취소</button>
         </div>
       )}
 
-      {/* 다중선택 모드 배너 */}
+      {/* 단체 선택 모드 배너 */}
       {multiMode && (
         <div style={{background:"#fffbf0",border:"1px solid #f5d89a",borderRadius:10,padding:"10px 16px",marginBottom:12}}>
           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,marginBottom:multiSel.length>0?10:0}}>
             <div style={{fontSize:13,color:C.accent}}>
               👥 단체 모드 — 테이블을 탭해서 선택하세요
-              {multiSel.length>0 && <span style={{marginLeft:8,fontWeight:700}}>{multiSel.sort((a,b)=>a-b).map(t=>tableNames[t]||`T${t}`).join(" + ")}</span>}
+              {multiSel.length>0 && <span style={{marginLeft:8,fontWeight:700}}>{multiSel.slice().sort((a,b)=>a-b).map(t=>tableNames[t]||`T${t}`).join(" + ")}</span>}
             </div>
-            <button onClick={cancelMulti} style={{background:"transparent",border:`1px solid ${C.border}`,color:C.text2,padding:"4px 14px",borderRadius:6,cursor:"pointer",fontSize:12,fontFamily:"inherit",whiteSpace:"nowrap"}}>취소</button>
+            <button onClick={cancelMulti} style={{background:"transparent",border:`1px solid ${C.border}`,color:C.text2,padding:"4px 12px",borderRadius:6,cursor:"pointer",fontSize:12,fontFamily:"inherit",whiteSpace:"nowrap"}}>취소</button>
           </div>
           {multiSel.length>=1 && (
             <div style={{display:"flex",gap:8}}>
-              <button
-                onClick={()=>openGroupWithSel('walkin')}
-                style={{flex:1,background:C.teal,color:"#fff",border:"none",borderRadius:8,padding:"10px",cursor:"pointer",fontFamily:"inherit",fontSize:13,fontWeight:600}}
-              >
-                🚶 워크인 등록
-              </button>
-              <button
-                onClick={()=>openGroupWithSel('reservation')}
-                style={{flex:1,background:C.accent,color:"#fff",border:"none",borderRadius:8,padding:"10px",cursor:"pointer",fontFamily:"inherit",fontSize:13,fontWeight:600}}
-              >
-                📋 예약 추가
-              </button>
+              <button onClick={()=>openGroupWithSel("walkin")} style={{flex:1,background:C.teal,color:"#fff",border:"none",borderRadius:8,padding:"10px",cursor:"pointer",fontFamily:"inherit",fontSize:13,fontWeight:600}}>🚶 워크인 등록</button>
+              <button onClick={()=>openGroupWithSel("reservation")} style={{flex:1,background:C.accent,color:"#fff",border:"none",borderRadius:8,padding:"10px",cursor:"pointer",fontFamily:"inherit",fontSize:13,fontWeight:600}}>📋 예약 추가</button>
             </div>
           )}
         </div>
       )}
 
       {/* 범례 + 요약 */}
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14,flexWrap:"wrap",gap:8}}>
-        <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
-          <div style={s.legend}>
-            {[["빈 테이블",C.green],["예약 있음",C.accent],["식사 중",C.red],["워크인",C.teal]].map(([l,c])=>(
-              <div key={l} style={s.legendItem}><div style={s.legendDot(c)}/>{l}</div>
-            ))}
-          </div>
-
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,flexWrap:"wrap",gap:8}}>
+        <div style={s.legend}>
+          {[["빈 테이블",C.green],["예약 있음",C.accent],["식사 중",C.red],["워크인",C.teal]].map(([l,c])=>(
+            <div key={l} style={s.legendItem}><div style={s.legendDot(c)}/>{l}</div>
+          ))}
         </div>
-        {(()=>{
-          const active = activeRes.filter(r=>r.status!=="done");
-          // groupId 기준으로 중복 제거한 팀 수
-          const seen = new Set(); let teams=0;
-          active.forEach(r=>{ const key=r.groupId?`g${r.groupId}`:`r${r.id}`; if(!seen.has(key)){seen.add(key);teams++;} });
-          const pax    = active.reduce((s,r)=>s+r.pax,0);
-          const dining = active.filter(r=>r.status==="dining").length;
-          const upcoming = active.filter(r=>r.status==="upcoming").length;
-          if(teams===0) return <div style={{fontSize:12,color:C.text3}}>예약 없음</div>;
-          return (
-            <div style={{background:C.bg3,border:`1px solid ${C.border}`,borderRadius:10,padding:"6px 14px",display:"flex",gap:12,alignItems:"center"}}>
-              <div style={{textAlign:"center"}}><div style={{fontSize:18,fontWeight:700,color:C.accent,lineHeight:1}}>{teams}</div><div style={{fontSize:10,color:C.text3,marginTop:2}}>팀</div></div>
-              <div style={{width:1,height:28,background:C.border}}/>
-              <div style={{textAlign:"center"}}><div style={{fontSize:18,fontWeight:700,color:C.accent,lineHeight:1}}>{pax}</div><div style={{fontSize:10,color:C.text3,marginTop:2}}>명</div></div>
-              {dining>0&&<><div style={{width:1,height:28,background:C.border}}/><div style={{textAlign:"center"}}><div style={{fontSize:14,fontWeight:600,color:C.red,lineHeight:1}}>{dining}</div><div style={{fontSize:10,color:C.text3,marginTop:2}}>식사중</div></div></>}
-              {upcoming>0&&<><div style={{width:1,height:28,background:C.border}}/><div style={{textAlign:"center"}}><div style={{fontSize:14,fontWeight:600,color:C.accent,lineHeight:1}}>{upcoming}</div><div style={{fontSize:10,color:C.text3,marginTop:2}}>예약대기</div></div></>}
-            </div>
-          );
-        })()}
+        {teams>0 && (
+          <div style={{background:C.bg3,border:`1px solid ${C.border}`,borderRadius:10,padding:"6px 14px",display:"flex",gap:12,alignItems:"center"}}>
+            <div style={{textAlign:"center"}}><div style={{fontSize:18,fontWeight:700,color:C.accent,lineHeight:1}}>{teams}</div><div style={{fontSize:10,color:C.text3,marginTop:2}}>팀</div></div>
+            <div style={{width:1,height:24,background:C.border}}/>
+            <div style={{textAlign:"center"}}><div style={{fontSize:18,fontWeight:700,color:C.accent,lineHeight:1}}>{totalPax}</div><div style={{fontSize:10,color:C.text3,marginTop:2}}>명</div></div>
+            {dining>0&&<><div style={{width:1,height:24,background:C.border}}/><div style={{textAlign:"center"}}><div style={{fontSize:14,fontWeight:600,color:C.red,lineHeight:1}}>{dining}</div><div style={{fontSize:10,color:C.text3,marginTop:2}}>식사중</div></div></>}
+            {upcoming>0&&<><div style={{width:1,height:24,background:C.border}}/><div style={{textAlign:"center"}}><div style={{fontSize:14,fontWeight:600,color:C.accent,lineHeight:1}}>{upcoming}</div><div style={{fontSize:10,color:C.text3,marginTop:2}}>예약대기</div></div></>}
+          </div>
+        )}
       </div>
 
-      {/* 테이블 그리드 */}
-      <div style={s.tablesGrid}>
-        {Array.from({length:tableCount},(_,i)=>i+1).map(n=>{
-          const { cls, status, name, pax, isGroup } = getTableDisplay(activeRes, n);
-          const tName = tableNames[n]||`T${n}`;
-          const isSwapFrom   = swapMode && swapFrom===n;
-          const isMultiSel   = multiMode && multiSel.includes(n);
-          const baseStyle    = s.tableCard(cls);
-
-          const cardStyle = isMultiSel
-            ? {...baseStyle, border:`2px solid ${C.accent}`, background:"#fffbf0", transform:"scale(1.04)"}
-            : isSwapFrom
-              ? {...baseStyle, border:"2px solid #4a7fa8", background:"#f0f6fc", transform:"scale(1.04)"}
-              : swapMode && swapFrom!==null
-                ? {...baseStyle, border:"2px dashed #4a7fa8", opacity:0.85}
-                : swapMode || multiMode
-                  ? {...baseStyle, opacity: multiMode&&!isMultiSel ? 0.75 : 1}
-                  : baseStyle;
-
+      {/* 본관 / 별관 탭 */}
+      <div style={{display:"flex",gap:0,marginBottom:16,background:C.bg3,borderRadius:12,padding:3,border:`1px solid ${C.border}`}}>
+        {[{key:"all",label:"전체 보기"}, ...WINGS].map(w=>{
+          const from = w.key==="all" ? 1 : WINGS.find(x=>x.key===w.key).from;
+          const to   = w.key==="all" ? tableCount : WINGS.find(x=>x.key===w.key).to;
+          const cnt  = activeRes.filter(r=>r.table>=from && r.table<=to && r.status!=="done").length;
           return (
-            <div
-              key={n}
-              style={{...cardStyle, transition:"all 0.15s", userSelect:"none"}}
-              onClick={()=>handleTableClick(n)}
-              onMouseDown={()=>handlePressStart(n)}
-              onMouseUp={handlePressEnd}
-              onMouseLeave={handlePressEnd}
-              onTouchStart={()=>handlePressStart(n)}
-              onTouchEnd={handlePressEnd}
-            >
-              <div style={s.tableNum}>{tName}</div>
-              {isMultiSel && <div style={{fontSize:9,color:C.accent,marginBottom:2,fontWeight:700}}>✓ 선택</div>}
-              {isSwapFrom && <div style={{fontSize:9,color:"#7ab8e8",marginBottom:2,fontWeight:700}}>선택됨</div>}
-              {isGroup && !isMultiSel && <div style={{fontSize:9,color:C.accent,marginBottom:1,fontWeight:700}}>👥</div>}
-              <div style={s.tableStatus(isSwapFrom?"reserved":cls)}>{status}</div>
-              {name&&<div style={s.tableName}>{name}</div>}
-              {pax&&<div style={s.tablePax}>{pax}</div>}
-            </div>
+            <button key={w.key} onClick={()=>setWing(w.key)} style={{
+              flex:1, padding:"9px 0", borderRadius:9, border:"none",
+              background: wing===w.key ? "#fff" : "transparent",
+              color: wing===w.key ? C.text : C.text2,
+              fontFamily:"inherit", fontSize:13, fontWeight: wing===w.key ? 600 : 400,
+              cursor:"pointer", transition:"all 0.15s",
+              boxShadow: wing===w.key ? "0 1px 4px rgba(0,0,0,0.08)" : "none",
+              display:"flex", alignItems:"center", justifyContent:"center", gap:5,
+            }}>
+              {w.label}
+              {cnt>0 && <span style={{background:C.accent,color:"#fff",fontSize:9,padding:"1px 5px",borderRadius:8,fontWeight:700}}>{cnt}</span>}
+            </button>
           );
         })}
       </div>
+
+      {/* 테이블 그리드 */}
+      {visibleWings.map(w=>(
+        <div key={w.key} style={{marginBottom: wing==="all" ? 24 : 0}}>
+          {wing==="all" && (
+            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+              <span style={{fontSize:13,fontWeight:600,color:C.text}}>{w.label}</span>
+              <span style={{fontSize:11,color:C.text3,background:C.bg3,border:`1px solid ${C.border}`,padding:"1px 8px",borderRadius:8}}>T{w.from}–T{w.to}</span>
+              <div style={{flex:1,height:1,background:C.border}}/>
+            </div>
+          )}
+          <div style={s.tablesGrid}>
+            {Array.from({length:w.to-w.from+1},(_,i)=>w.from+i).map(renderTableCard)}
+          </div>
+        </div>
+      ))}
+
+      {/* 단체 선택 힌트 */}
+      {!multiMode && !swapMode && (
+        <div style={{textAlign:"center",padding:"10px 0 2px",fontSize:11,color:C.text3}}>
+          테이블을 길게 누르면 단체 선택 모드로 진입해요
+        </div>
+      )}
     </div>
   );
 }
+
 
 // ── ReservationsPage ──────────────────────────────────────
 function ReservationsPage({ store, reservations, tableNames, onAdd, onWalkIn, onEdit, onCancel, onSetStatus, confirmCancel, onConfirmCancel, onDismissCancel, onMove, onOpenGroup }) {
@@ -1238,13 +1270,23 @@ function App() {
         tableCounts[0] = s.table_count || 14;
       }
 
+      // wing 설정 복원
+      const wingCounts = {};
+      const wingNames  = {};
+      settings.forEach(s => {
+        if(s.wing_counts) wingCounts[0] = s.wing_counts;
+        if(s.wing_names)  wingNames[0]  = s.wing_names;
+      });
+      if(!wingCounts[0]) wingCounts[0] = [7,7];
+      if(!wingNames[0])  wingNames[0]  = ['본관','별관'];
+
       const maxResId  = reservations.length  ? Math.max(...reservations.map(r=>r.id))  + 1 : 1;
       const maxCustId = customers.length     ? Math.max(...customers.map(c=>c.id))     + 1 : 1;
 
       setData({
         reservations: reservations.map(toRes),
         customers:    customers.map(toCust),
-        tableNames, tableCounts,
+        tableNames, tableCounts, wingCounts, wingNames,
         nextResId:  maxResId,
         nextCustId: maxCustId,
       });
@@ -1265,6 +1307,8 @@ function App() {
   }, []);
   const tableNames  = data.tableNames[store]||defaultTableNames(store);
   const tableCount   = data.tableCounts?.[store] ?? STORES[store].tables;
+  const wingCounts   = data.wingCounts?.[store]  || [Math.ceil(tableCount/2), Math.floor(tableCount/2)];
+  const wingNames    = data.wingNames?.[store]   || ['본관','별관'];
 
   const setResStatus=(id,status)=>{
     setData(d=>({...d,reservations:d.reservations.map(r=>r.id===id?{...r,status}:r)}));
@@ -1473,7 +1517,7 @@ function App() {
         {navItems.map(n=><button key={n.key} style={s.navTab(page===n.key)} onClick={()=>setPage(n.key)}>{n.label}</button>)}
       </div>
       <div style={s.main}>
-        {page==="seats"&&<SeatsPage store={store} reservations={data.reservations} tableNames={tableNames} onTableClick={(n,ds)=>setTableModal({open:true,tableNum:n,selectedDate:ds})} onOpenTableNames={()=>setTableNamesModal(true)} tableCount={tableCount} onSwapTables={swapTables} onOpenGroup={(ds,tables,mode)=>{ setSelectedGroupTables(tables||[]); setGroupModal({open:true,defaultDate:ds,defaultMode:mode||'walkin',defaultTables:tables||[]}); }}/>}
+        {page==="seats"&&<SeatsPage store={store} reservations={data.reservations} tableNames={tableNames} tableCount={tableCount} wingCounts={wingCounts} wingNames={wingNames} onTableClick={(n,ds)=>setTableModal({open:true,tableNum:n,selectedDate:ds})} onOpenTableNames={()=>setTableNamesModal(true)} onSwapTables={swapTables} onOpenGroup={(ds,tables,mode)=>{ setSelectedGroupTables(tables||[]); setGroupModal({open:true,defaultDate:ds,defaultMode:mode||'walkin',defaultTables:tables||[]}); }}/>}
         {page==="reservations"&&<ReservationsPage store={store} reservations={data.reservations} tableNames={tableNames} onAdd={date=>setResModal({open:true,editing:null,defaultDate:date,defaultTable:null})} onWalkIn={date=>setWalkInModal({open:true,defaultDate:date,defaultTable:null})} onEdit={r=>setResModal({open:true,editing:r,defaultDate:null,defaultTable:null})} onCancel={cancelReservation} confirmCancel={confirmCancel} onConfirmCancel={doCancel} onDismissCancel={()=>setConfirmCancel(null)} onMove={r=>setResModal({open:true,editing:r,defaultDate:null,defaultTable:null})} onSetStatus={setResStatus} onOpenGroup={(ds,tables,mode)=>{ setSelectedGroupTables(tables||[]); setGroupModal({open:true,defaultDate:ds,defaultMode:mode||'walkin',defaultTables:tables||[]}); }}/>}
         {page==="customers"&&<CustomersPage store={store} customers={data.customers} onAdd={()=>setCustModal({open:true,editing:null})} onEdit={c=>setCustModal({open:true,editing:c})}/>}
       </div>
@@ -1495,7 +1539,7 @@ function App() {
         defaultMode={groupModal.defaultMode}
         defaultTables={groupModal.defaultTables}
       />
-      <TableNamesModal open={tableNamesModal} onClose={()=>setTableNamesModal(false)} onSave={saveTableSettings} store={store} tableNames={tableNames} tableCount={tableCount}/>
+      <TableNamesModal open={tableNamesModal} onClose={()=>setTableNamesModal(false)} onSave={saveTableSettings} store={store} tableNames={tableNames} tableCount={tableCount} wingCounts={wingCounts} wingNames={wingNames}/>
       <Toast msg={toast}/>
     </div>
   );
